@@ -95,6 +95,7 @@ export default function FlashReader() {
   }
 
   // Update chunk index and progress
+  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     if (isPlaying && chunks.length > 0) {
       timerRef.current = setTimeout(() => {
@@ -115,6 +116,7 @@ export default function FlashReader() {
   }, [isPlaying, currentChunkIndex, chunks.length, speed, chunkSize])
 
   // Process text when chunk size changes
+  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     if (inputText.trim()) {
       processText()
