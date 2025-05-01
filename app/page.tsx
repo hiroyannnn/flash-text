@@ -234,11 +234,18 @@ export default function FlashReader() {
                 </p>
               </div>
 
-              <div className="w-full bg-gray-200 rounded-full h-2.5 mb-6 dark:bg-gray-700">
+              <div
+                className="w-full bg-gray-200 rounded-full h-2.5 mb-6 dark:bg-gray-700"
+                role="progressbar"
+                aria-valuenow={progress}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                tabIndex={0}
+              >
                 <div
                   className="bg-primary h-2.5 rounded-full transition-all duration-300"
                   style={{ width: `${progress}%` }}
-                ></div>
+                />
               </div>
 
               <div className="flex gap-2">
