@@ -1,36 +1,62 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# フラッシュテキスト
 
-## Getting Started
+フラッシュテキストは、長文のテキストを短い長さで高速に表示することで、速読を支援するWebアプリケーションです。
 
-First, run the development server:
+## 特徴
+
+- テキストを指定した文字数でフラッシュ表示
+- 表示速度の調整（50ms〜1000ms）
+- 表示文字数の調整（1〜20文字）
+- シンプルで使いやすいインターフェース
+- レスポンシブデザイン
+
+## 技術スタック
+
+- Next.js 15
+- TypeScript
+- Tailwind CSS
+- React Hooks
+
+## 使い方
+
+1. テキストエリアに読みたい文章を入力します
+2. 表示速度をスライダーで調整します（デフォルト: 200ms）
+3. 表示文字数をスライダーで調整します（デフォルト: 5文字）
+4. 「開始」ボタンをクリックすると、テキストが指定された速度と文字数で表示されます
+5. 「停止」ボタンをクリックすると、表示が停止します
+
+## 開発環境のセットアップ
 
 ```bash
+# リポジトリのクローン
+git clone https://github.com/your-username/flash-text.git
+cd flash-text
+
+# 依存関係のインストール
+npm install
+
+# 開発サーバーの起動
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+アプリケーションは <http://localhost:3000> でアクセスできます。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 今後の改善予定
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- ダークモードのサポート
+- フォントサイズの調整機能
+- 表示位置の調整（左寄せ、中央、右寄せ）
+- テキストの保存機能
+- キーボードショートカットのサポート
 
-## Learn More
+## ライセンス
 
-To learn more about Next.js, take a look at the following resources:
+MIT
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 作者
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+hiroyannnn
 
-## Deploy on Vercel
+## 貢献
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+バグ報告や機能リクエストは、IssueまたはPull Requestでお知らせください。
