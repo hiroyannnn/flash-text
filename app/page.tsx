@@ -24,13 +24,14 @@ import {
 } from "@/components/ui/card";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
+import { chunkIndexAt, displayDurationMs, splitIntoChunks, type Chunk } from "@/lib/reading";
 
 export default function FlashReader() {
   const [inputText, setInputText] = useState("");
-  const [chunks, setChunks] = useState<string[]>([]);
+  const [chunks, setChunks] = useState<Chunk[]>([]);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [speed, setSpeed] = useState(300); // words per minute
+  const [speed, setSpeed] = useState(300); // characters per minute
   const [chunkSize, setChunkSize] = useState(5); // characters per chunk
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const [progress, setProgress] = useState(0);
@@ -38,41 +39,29 @@ export default function FlashReader() {
     "mid"
   );
 
-  // Split text into chunks by characters
+  // Split text into Unicode code points, keeping stable text offsets.
   const processText = () => {
     if (!inputText.trim()) return;
-
-    const textChunks = [];
-    const text = inputText.replace(/\s+/g, " ").trim();
-
-    for (let i = 0; i < text.length; i += chunkSize) {
-      textChunks.push(text.substring(i, i + chunkSize));
-    }
-
+    const offset = chunks[currentChunkIndex]?.start ?? 0;
+    const textChunks = splitIntoChunks(inputText, chunkSize, offset);
+    const index = chunkIndexAt(textChunks, offset);
     setChunks(textChunks);
-    setCurrentChunkIndex(0);
-    setProgress(0);
+    setCurrentChunkIndex(index);
+    setProgress(textChunks.length <= 1 ? 0 : (index / (textChunks.length - 1)) * 100);
   };
 
-  // Calculate delay based on speed (characters per minute)
-  const getDelayInMs = () => {
-    // Convert characters per minute to milliseconds per chunk
-    return (60 / speed) * 1000 * (chunkSize / 5); // Assuming average 5 chars per word
-  };
-
-  // Start the flash reading
   const startReading = () => {
     if (chunks.length === 0) {
-      processText();
+      const initial = splitIntoChunks(inputText, chunkSize);
+      setChunks(initial);
+      setCurrentChunkIndex(0);
+      setProgress(0);
     }
-
     setIsPlaying(true);
   };
 
-  // Pause the flash reading
-  const pauseReading = () => {
-    setIsPlaying(false);
-  };
+  // Pausing never advances to a chunk that has not been displayed.
+  const pauseReading = () => setIsPlaying(false);
 
   // Reset the flash reading
   const resetReading = () => {
@@ -112,7 +101,6 @@ export default function FlashReader() {
   };
 
   // Update chunk index and progress
-  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     if (isPlaying && chunks.length > 0) {
       timerRef.current = setTimeout(() => {
@@ -121,8 +109,9 @@ export default function FlashReader() {
           setProgress(((currentChunkIndex + 1) / (chunks.length - 1)) * 100);
         } else {
           setIsPlaying(false);
+          setProgress(100);
         }
-      }, getDelayInMs());
+      }, displayDurationMs(chunks[currentChunkIndex].text, speed));
     }
 
     return () => {
@@ -130,7 +119,15 @@ export default function FlashReader() {
         clearTimeout(timerRef.current);
       }
     };
-  }, [isPlaying, currentChunkIndex, chunks.length, speed, chunkSize]);
+  }, [isPlaying, currentChunkIndex, chunks, speed]);
+
+  useEffect(() => {
+    const pauseWhenHidden = () => {
+      if (document.hidden) setIsPlaying(false);
+    };
+    document.addEventListener("visibilitychange", pauseWhenHidden);
+    return () => document.removeEventListener("visibilitychange", pauseWhenHidden);
+  }, []);
 
   // Process text when chunk size changes
   // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
@@ -268,7 +265,7 @@ export default function FlashReader() {
               <div className="h-32 flex items-center justify-center w-full mb-4 border rounded-lg">
                 <p className="text-2xl font-medium text-center px-4">
                   {chunks.length > 0
-                    ? chunks[currentChunkIndex]
+                    ? chunks[currentChunkIndex].text
                     : "テキストを入力して開始ボタンを押してください"}
                 </p>
               </div>
