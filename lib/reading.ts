@@ -1,4 +1,4 @@
-export type Chunk = { text: string; start: number; end: number };
+export type Chunk = { text: string; start: number; end: number; blockId?: string; review?: boolean };
 
 /** Positions use Unicode code points, so a display change can keep its place. */
 export function splitIntoChunks(text: string, size: number, anchor = 0): Chunk[] {
