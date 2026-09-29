@@ -6,17 +6,49 @@ export type BookDocument = {
   revisionId: string;
   title: string;
   language: "ja";
-  sourceKind: "epub";
-  coverage: "full-user-confirmed" | "unknown";
-  units: { id: string; ordinal: number; epubHref: string }[];
-  blocks: {
+  sourceKind: "epub" | "kindle-capture";
+  coverage: "full-user-confirmed" | "unknown" | "partial";
+  units: { id: string; ordinal: number; epubHref?: string; imagePath?: string; imageSha256?: string; widthPx?: number; heightPx?: number }[];
+  blocks: ({
     id: string;
     kind: "heading" | "paragraph";
     canonicalText: string;
-    sourceSpans: { unitId: string; startCp: number; endCp: number }[];
-    quality: "unreviewed";
-  }[];
+    sourceSpans: { unitId: string; startCp: number; endCp: number; bbox?: [number, number, number, number] }[];
+    quality: "unreviewed" | "accepted" | "needs-review";
+  } | {
+    id: string;
+    kind: "review";
+    reason: "figure" | "table" | "code" | "formula" | "ocr" | "reading-order";
+    sourceUnitIds: string[];
+  })[];
 };
+
+import { splitIntoChunks, type Chunk } from "./reading";
+
+export const REVIEW_TEXT = "［原文を確認］";
+
+export function blockText(block: BookDocument["blocks"][number]): string {
+  return block.kind === "review" ? REVIEW_TEXT : block.canonicalText;
+}
+
+export function bookChunks(book: BookDocument, size: number, anchor = 0): Chunk[] {
+  const result: Chunk[] = [];
+  let offset = 0;
+  for (const block of book.blocks) {
+    const text = blockText(block);
+    if (block.kind === "review") {
+      result.push({ text, start: offset, end: offset + Array.from(text).length,
+        blockId: block.id, review: true });
+    } else {
+      const localAnchor = anchor >= offset ? anchor - offset : 0;
+      result.push(...splitIntoChunks(text, size, localAnchor).map((chunk) => ({
+        ...chunk, start: chunk.start + offset, end: chunk.end + offset, blockId: block.id,
+      })));
+    }
+    offset += Array.from(text).length + 1;
+  }
+  return result;
+}
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_ENTRIES = 2000;
@@ -142,5 +174,5 @@ export async function importEpub(file: File): Promise<BookDocument> {
 }
 
 export function readingText(book: BookDocument): string {
-  return book.blocks.map((block) => block.canonicalText).join(" ");
+  return book.blocks.map(blockText).join(" ");
 }
