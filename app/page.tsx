@@ -25,9 +25,15 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { chunkIndexAt, displayDurationMs, splitIntoChunks, type Chunk } from "@/lib/reading";
+import { importEpub, readingText, type BookDocument } from "@/lib/book";
+import { listBooks, loadPosition, saveBook, savePosition } from "@/lib/book-store";
 
 export default function FlashReader() {
   const [inputText, setInputText] = useState("");
+  const [books, setBooks] = useState<BookDocument[]>([]);
+  const [activeBook, setActiveBook] = useState<BookDocument | null>(null);
+  const [importError, setImportError] = useState("");
+  const [importing, setImporting] = useState(false);
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -72,12 +78,62 @@ export default function FlashReader() {
 
   // Handle text input change
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setActiveBook(null);
     setInputText(e.target.value);
     setChunks([]);
     setCurrentChunkIndex(0);
     setProgress(0);
     setIsPlaying(false);
   };
+
+  const openBook = (book: BookDocument) => {
+    const text = readingText(book);
+    const offset = loadPosition(book);
+    const nextChunks = splitIntoChunks(text, chunkSize, offset);
+    const index = chunkIndexAt(nextChunks, offset);
+    setActiveBook(book);
+    setInputText(text);
+    setChunks(nextChunks);
+    setCurrentChunkIndex(index);
+    setProgress(nextChunks.length <= 1 ? 0 : (index / (nextChunks.length - 1)) * 100);
+    setIsPlaying(false);
+  };
+
+  const handleEpub = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImportError("");
+    setImporting(true);
+    try {
+      if (!file.name.toLowerCase().endsWith(".epub")) throw new Error("EPUBファイルを選んでください");
+      const book = await importEpub(file);
+      await saveBook(book);
+      setBooks(await listBooks());
+      openBook(book);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "取り込みに失敗しました");
+    } finally {
+      setImporting(false);
+      event.target.value = "";
+    }
+  };
+
+  useEffect(() => {
+    if (!("indexedDB" in window)) return;
+    let mounted = true;
+    listBooks().then((saved) => {
+      if (mounted) setBooks(saved);
+    }).catch(() => {
+      if (mounted) setImportError("保存済みの本を開けませんでした");
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    if (activeBook && chunks.length) {
+      savePosition(activeBook, chunks[currentChunkIndex]?.start ?? 0);
+    }
+  }, [activeBook, chunks, currentChunkIndex]);
 
   // Handle speed preset change
   const handleSpeedPresetChange = (
@@ -146,6 +202,25 @@ export default function FlashReader() {
       <div className="grid gap-6">
         <Card>
           <CardHeader>
+            <CardTitle>本を取り込む</CardTitle>
+            <CardDescription>公式にダウンロードできる暗号化されていないEPUBを端末内に保存します</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <input type="file" accept=".epub,application/epub+zip" aria-label="EPUBを選ぶ"
+              onChange={handleEpub} disabled={importing} />
+            {importing && <p role="status">取り込み中...</p>}
+            {importError && <p role="alert" className="text-destructive">{importError}</p>}
+            {books.map((book) => (
+              <div key={book.documentId} className="flex items-center justify-between gap-2">
+                <span className="truncate">{book.title}</span>
+                <Button variant="outline" onClick={() => openBook(book)}>続きから</Button>
+              </div>
+            ))}
+            {activeBook && <p className="text-sm text-muted-foreground">{activeBook.title}・取り込み済み範囲</p>}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
             <CardTitle>テキスト入力</CardTitle>
             <CardDescription>
               速読したいテキストを入力してください
@@ -157,11 +232,13 @@ export default function FlashReader() {
               className="min-h-[150px]"
               value={inputText}
               onChange={handleTextChange}
+              readOnly={activeBook !== null}
             />
             <div className="mt-4">
               <Button
                 variant="outline"
                 onClick={() => {
+                  setActiveBook(null);
                   setInputText(`「あれ、意外と読める」と気づきました。フラッシュテキストで文章を読んでみたら、普段より早く読めるんです。目線を左右に動かす必要がないから、自然と読むスピードが上がるみたい。
 
 長文を読む時って、目線を右から左に動かすのが意外と時間を取るんですよね。でもフラッシュテキストなら、文字が目の前に表示されるから、その分だけ早く読める。最初は「こんな速さで読めるの？」って思ったけど、使ってみたら意外と自然に読めました。
