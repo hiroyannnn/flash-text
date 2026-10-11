@@ -99,7 +99,9 @@ export function loadPosition(book: BookDocument): number {
     let offset = 0;
     for (const block of book.blocks) {
       if (block.id === saved.blockId) {
-        return offset + Math.min(saved.offsetCp, Array.from(blockText(block)).length);
+        // Same revision means the same blocks, so an offset past this block is corrupt.
+        // Clamping it would resume at the next block instead of the beginning.
+        return saved.offsetCp <= Array.from(blockText(block)).length ? offset + saved.offsetCp : 0;
       }
       offset += Array.from(blockText(block)).length + 1;
     }
