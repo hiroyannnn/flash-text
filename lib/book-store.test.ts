@@ -26,4 +26,18 @@ describe("reading position", () => {
     savePosition(book, 5);
     expect(loadPosition({ ...book, revisionId: "v2" })).toBe(0);
   });
+
+  it("starts from the beginning when the saved offset is past its block", () => {
+    localStorage.setItem("flash-position:test-book", JSON.stringify({
+      revisionId: "v1", blockId: "b1", offsetCp: 4,
+    }));
+    expect(loadPosition(book)).toBe(0);
+  });
+
+  it("keeps an offset at the end of its block", () => {
+    localStorage.setItem("flash-position:test-book", JSON.stringify({
+      revisionId: "v1", blockId: "b2", offsetCp: 3,
+    }));
+    expect(loadPosition(book)).toBe(7);
+  });
 });
