@@ -4,6 +4,30 @@ const DB_NAME = "flash-text-books";
 const STORE_NAME = "books";
 const IMAGE_STORE = "images";
 
+export type ReadingState = {
+  offset: number;
+  completed: boolean;
+  updatedAt: string | null;
+  resetReason: "revision" | "invalid" | null;
+};
+
+export function bookLength(book: BookDocument): number {
+  let offset = 0;
+  let end = 0;
+  for (const block of book.blocks) {
+    const text = blockText(block);
+    const displayedLength = Array.from(text.replace(/\s+/g, " ").trim()).length;
+    if (displayedLength) end = offset + displayedLength;
+    // Preserve the legacy block coordinates, including gaps that are not displayed.
+    offset += Array.from(text).length + 1;
+  }
+  return end;
+}
+
+function emptyReadingState(resetReason: ReadingState["resetReason"] = null): ReadingState {
+  return { offset: 0, completed: false, updatedAt: null, resetReason };
+}
+
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 2);
@@ -77,7 +101,8 @@ export function listBooks(): Promise<BookDocument[]> {
   return request("readonly", (store) => store.getAll());
 }
 
-export function savePosition(book: BookDocument, offset: number): void {
+export function savePosition(book: BookDocument, offset: number, completed = false): ReadingState {
+  if (!Number.isInteger(offset) || offset < 0 || !book.blocks.length) throw new RangeError("Invalid reading position");
   let remaining = offset;
   let block = book.blocks[0];
   for (const candidate of book.blocks) {
@@ -86,29 +111,49 @@ export function savePosition(book: BookDocument, offset: number): void {
     if (remaining <= length) break;
     remaining -= length + 1;
   }
+  if (remaining > Array.from(blockText(block)).length) throw new RangeError("Invalid reading position");
+  const isCompleted = completed && offset === bookLength(book);
+  const updatedAt = new Date().toISOString();
   localStorage.setItem(`flash-position:${book.documentId}`, JSON.stringify({
     revisionId: book.revisionId, blockId: block.id,
-    offsetCp: Math.max(0, remaining), updatedAt: new Date().toISOString(),
+    offsetCp: Math.max(0, remaining), completed: isCompleted, updatedAt,
   }));
+  return { offset, completed: isCompleted, updatedAt, resetReason: null };
 }
 
-export function loadPosition(book: BookDocument): number {
+export function loadReadingState(book: BookDocument): ReadingState {
   // Storage access failures must reach the UI so it cannot overwrite an unread bookmark.
   const raw = localStorage.getItem(`flash-position:${book.documentId}`);
+  if (raw === null) return emptyReadingState();
   try {
-    const saved = JSON.parse(raw ?? "null");
-    if (saved?.revisionId !== book.revisionId || !Number.isInteger(saved.offsetCp) || saved.offsetCp < 0) return 0;
+    const saved = JSON.parse(raw);
+    if (saved?.revisionId !== book.revisionId) {
+      return emptyReadingState(typeof saved?.revisionId === "string" ? "revision" : "invalid");
+    }
+    if (!Number.isInteger(saved.offsetCp) || saved.offsetCp < 0) return emptyReadingState("invalid");
     let offset = 0;
     for (const block of book.blocks) {
       if (block.id === saved.blockId) {
         // Same revision means the same blocks, so an offset past this block is corrupt.
         // Clamping it would resume at the next block instead of the beginning.
-        return saved.offsetCp <= Array.from(blockText(block)).length ? offset + saved.offsetCp : 0;
+        if (saved.offsetCp > Array.from(blockText(block)).length) return emptyReadingState("invalid");
+        const position = offset + saved.offsetCp;
+        return {
+          offset: position,
+          completed: saved.completed === true && position === bookLength(book),
+          updatedAt: typeof saved.updatedAt === "string" && Number.isFinite(Date.parse(saved.updatedAt)) ? saved.updatedAt : null,
+          resetReason: null,
+        };
       }
       offset += Array.from(blockText(block)).length + 1;
     }
-    return 0;
+    return emptyReadingState("invalid");
   } catch {
-    return 0;
+    return emptyReadingState("invalid");
   }
+}
+
+/** Compatibility for callers that only need the legacy numeric position. */
+export function loadPosition(book: BookDocument): number {
+  return loadReadingState(book).offset;
 }
