@@ -2,7 +2,7 @@
 
 import type React from "react";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
@@ -24,43 +24,56 @@ import {
 } from "@/components/ui/card";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
-import { chunkIndexAt, displayDurationMs, splitIntoChunks, type Chunk } from "@/lib/reading";
+import { chunkIndexAt, displayDurationMs, readingProgress, splitIntoChunks, type Chunk } from "@/lib/reading";
 import { bookChunks, importEpub, readingText, type BookDocument } from "@/lib/book";
-import { getSourceImage, listBooks, loadPosition, saveBook, saveFlashbook, savePosition } from "@/lib/book-store";
+import { bookLength, getSourceImage, listBooks, loadReadingState, saveBook, saveFlashbook, savePosition, type ReadingState } from "@/lib/book-store";
 import { importFlashbook } from "@/lib/flashbook";
+import { DEFAULT_SETTINGS, loadReaderSettings, saveReaderSettings, type ReaderSettings, type SpeedMode } from "@/lib/reader-settings";
 
 export default function FlashReader() {
   const [inputText, setInputText] = useState("");
+  const [draftText, setDraftText] = useState("");
+  const [draftWarning, setDraftWarning] = useState(false);
   const [books, setBooks] = useState<BookDocument[]>([]);
+  const [bookStates, setBookStates] = useState<Record<string, ReadingState | null>>({});
   const [activeBook, setActiveBook] = useState<BookDocument | null>(null);
   const [importError, setImportError] = useState("");
   const [positionReadError, setPositionReadError] = useState(false);
   const [positionSaveError, setPositionSaveError] = useState(false);
+  const [positionNotice, setPositionNotice] = useState("");
   const [importing, setImporting] = useState(false);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const sourceUrlRef = useRef<string | null>(null);
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [speed, setSpeed] = useState(300); // characters per minute
-  const [chunkSize, setChunkSize] = useState(5); // characters per chunk
+  const [speed, setSpeed] = useState(DEFAULT_SETTINGS.speed);
+  const [chunkSize, setChunkSize] = useState(DEFAULT_SETTINGS.chunkSize);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const [progress, setProgress] = useState(0);
-  const [speedMode, setSpeedMode] = useState<"low" | "mid" | "high" | "custom">(
-    "mid"
-  );
+  const [completed, setCompleted] = useState(false);
+  const [speedMode, setSpeedMode] = useState<SpeedMode>(DEFAULT_SETTINGS.speedMode);
+  const [settingsReadError, setSettingsReadError] = useState(false);
+  const [settingsSaveError, setSettingsSaveError] = useState(false);
+  const [settingsNotice, setSettingsNotice] = useState("");
+  const readingEnd = chunks.at(-1)?.end ?? 0;
+  const position = completed ? readingEnd : chunks[currentChunkIndex]?.start ?? 0;
+  const progress = readingProgress(position, readingEnd, completed);
+  const lengths = useMemo(() => new Map(books.map((book) => [book.documentId, bookLength(book)])), [books]);
+  const sortedBooks = useMemo(() => [...books].sort((a, b) =>
+    Date.parse(bookStates[b.documentId]?.updatedAt ?? "1970-01-01") -
+    Date.parse(bookStates[a.documentId]?.updatedAt ?? "1970-01-01")), [books, bookStates]);
+  const recentBook = sortedBooks.find((book) => bookStates[book.documentId]?.updatedAt);
 
   // Split text into Unicode code points, keeping stable text offsets.
   const processText = () => {
     if (!inputText.trim()) return;
-    const offset = chunks[currentChunkIndex]?.start ?? 0;
+    const offset = position;
     const textChunks = activeBook
       ? bookChunks(activeBook, chunkSize, offset)
       : splitIntoChunks(inputText, chunkSize, offset);
     const index = chunkIndexAt(textChunks, offset);
     setChunks(textChunks);
     setCurrentChunkIndex(index);
-    setProgress(textChunks.length <= 1 ? 0 : (index / (textChunks.length - 1)) * 100);
   };
 
   const startReading = () => {
@@ -68,7 +81,6 @@ export default function FlashReader() {
       const initial = activeBook ? bookChunks(activeBook, chunkSize) : splitIntoChunks(inputText, chunkSize);
       setChunks(initial);
       setCurrentChunkIndex(0);
-      setProgress(0);
     }
     if (chunks[currentChunkIndex]?.review) {
       void openSource();
@@ -84,7 +96,7 @@ export default function FlashReader() {
   const resetReading = () => {
     setIsPlaying(false);
     setCurrentChunkIndex(0);
-    setProgress(0);
+    setCompleted(false);
   };
 
   // Handle text input change
@@ -92,9 +104,10 @@ export default function FlashReader() {
     closeSource();
     setActiveBook(null);
     setInputText(e.target.value);
+    setDraftText(e.target.value);
     setChunks([]);
     setCurrentChunkIndex(0);
-    setProgress(0);
+    setCompleted(false);
     setIsPlaying(false);
   };
 
@@ -102,8 +115,15 @@ export default function FlashReader() {
     closeSource();
     const text = readingText(book);
     let offset = 0;
+    let isCompleted = false;
+    setPositionNotice("");
+    setDraftWarning(false);
     try {
-      offset = loadPosition(book);
+      const saved = loadReadingState(book);
+      offset = saved.offset;
+      isCompleted = saved.completed;
+      if (saved.resetReason === "revision") setPositionNotice("本文の版が変わったため、先頭から開きました。");
+      if (saved.resetReason === "invalid") setPositionNotice("保存位置を使えないため、先頭から開きました。");
       setPositionReadError(false);
     } catch {
       setPositionReadError(true);
@@ -115,7 +135,7 @@ export default function FlashReader() {
     setInputText(text);
     setChunks(nextChunks);
     setCurrentChunkIndex(index);
-    setProgress(nextChunks.length <= 1 ? 0 : (index / (nextChunks.length - 1)) * 100);
+    setCompleted(isCompleted);
     setIsPlaying(false);
   };
 
@@ -134,7 +154,9 @@ export default function FlashReader() {
         book = await importEpub(file);
         await saveBook(book);
       } else throw new Error("EPUBまたは.flashbook.zipを選んでください");
-      setBooks(await listBooks());
+      const savedBooks = await listBooks();
+      setBooks(savedBooks);
+      refreshBookStates(savedBooks);
       openBook(book);
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "取り込みに失敗しました");
@@ -170,6 +192,59 @@ export default function FlashReader() {
     sourceUrlRef.current = null;
   };
 
+  const openNewText = (text = draftText) => {
+    closeSource();
+    setDraftWarning(positionSaveError || positionReadError);
+    setActiveBook(null);
+    setInputText(text);
+    setDraftText(text);
+    setChunks([]);
+    setCurrentChunkIndex(0);
+    setCompleted(false);
+    setIsPlaying(false);
+    setPositionReadError(false);
+    setPositionSaveError(false);
+    setPositionNotice("");
+  };
+
+  const refreshBookStates = useCallback((savedBooks: BookDocument[]) => {
+    const states: Record<string, ReadingState | null> = {};
+    for (const book of savedBooks) {
+      try { states[book.documentId] = loadReadingState(book); }
+      catch { states[book.documentId] = null; }
+    }
+    setBookStates(states);
+  }, []);
+
+  const restoreSettings = useCallback(() => {
+    try {
+      const { settings, invalid } = loadReaderSettings();
+      setSpeed(settings.speed);
+      setChunkSize(settings.chunkSize);
+      setSpeedMode(settings.speedMode);
+      setSettingsReadError(false);
+      setSettingsSaveError(false);
+      setSettingsNotice(invalid ? "保存済みの設定を使えないため、標準設定で開きました。" : "");
+    } catch { setSettingsReadError(true); }
+  }, []);
+
+  const persistSettings = (settings: ReaderSettings) => {
+    try {
+      saveReaderSettings(settings);
+      setSettingsSaveError(false);
+      setSettingsNotice("");
+    } catch { setSettingsSaveError(true); }
+  };
+
+  const applySettings = (settings: ReaderSettings) => {
+    setSpeed(settings.speed);
+    setChunkSize(settings.chunkSize);
+    setSpeedMode(settings.speedMode);
+    if (!settingsReadError) persistSettings(settings);
+  };
+
+  useEffect(() => { restoreSettings(); }, [restoreSettings]);
+
   useEffect(() => () => {
     if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
   }, []);
@@ -178,16 +253,20 @@ export default function FlashReader() {
     if (!("indexedDB" in window)) return;
     let mounted = true;
     listBooks().then((saved) => {
-      if (mounted) setBooks(saved);
+      if (mounted) {
+        setBooks(saved);
+        refreshBookStates(saved);
+      }
     }).catch(() => {
       if (mounted) setImportError("保存済みの本を開けませんでした");
     });
     return () => { mounted = false; };
-  }, []);
+  }, [refreshBookStates]);
 
-  const persistPosition = useCallback((book: BookDocument, offset: number) => {
+  const persistPosition = useCallback((book: BookDocument, offset: number, isCompleted: boolean) => {
     try {
-      savePosition(book, offset);
+      const saved = savePosition(book, offset, isCompleted);
+      setBookStates((states) => ({ ...states, [book.documentId]: saved }));
       setPositionSaveError(false);
     } catch {
       setPositionSaveError(true);
@@ -198,29 +277,14 @@ export default function FlashReader() {
     if (!activeBook) {
       setPositionSaveError(false);
     } else if (chunks.length && !positionReadError) {
-      persistPosition(activeBook, chunks[currentChunkIndex]?.start ?? 0);
+      persistPosition(activeBook, position, completed);
     }
-  }, [activeBook, chunks, currentChunkIndex, positionReadError, persistPosition]);
+  }, [activeBook, chunks, position, completed, positionReadError, persistPosition]);
 
   // Handle speed preset change
-  const handleSpeedPresetChange = (
-    value: "low" | "mid" | "high" | "custom"
-  ) => {
-    setSpeedMode(value);
-
-    // Set speed based on preset
-    switch (value) {
-      case "low":
-        setSpeed(150);
-        break;
-      case "mid":
-        setSpeed(300);
-        break;
-      case "high":
-        setSpeed(600);
-        break;
-      // For custom, keep the current speed
-    }
+  const handleSpeedPresetChange = (value: SpeedMode) => {
+    const speeds = { low: 150, mid: 300, high: 600 };
+    applySettings({ speed: value === "custom" ? speed : speeds[value], chunkSize, speedMode: value });
   };
 
   // Update chunk index and progress
@@ -233,10 +297,9 @@ export default function FlashReader() {
       timerRef.current = setTimeout(() => {
         if (currentChunkIndex < chunks.length - 1) {
           setCurrentChunkIndex((prev) => prev + 1);
-          setProgress(((currentChunkIndex + 1) / (chunks.length - 1)) * 100);
         } else {
           setIsPlaying(false);
-          setProgress(100);
+          setCompleted(true);
         }
       }, displayDurationMs(chunks[currentChunkIndex].text, speed));
     }
@@ -264,11 +327,26 @@ export default function FlashReader() {
     }
   }, [chunkSize]);
 
+  const settingsFeedback = <>
+      {settingsReadError && (
+        <div role="alert" className="mb-4 space-y-2 text-destructive">
+          <p>設定を読み込めません。変更はこの画面だけに反映し、保存済みの設定は上書きしません。</p>
+          <Button variant="outline" onClick={restoreSettings}>設定を再読込</Button>
+        </div>
+      )}
+      {!settingsReadError && settingsSaveError && (
+        <div role="alert" className="mb-4 space-y-2 text-destructive">
+          <p>設定を保存できません。次回は最後に保存できた設定で開きます。</p>
+          <Button variant="outline" onClick={() => persistSettings({ speed, chunkSize, speedMode })}>設定の保存を再試行</Button>
+        </div>
+      )}
+      {settingsNotice && <output className="mb-4 block">{settingsNotice}</output>}
+  </>;
+
   return (
     <div className="container mx-auto px-4 py-8 max-w-3xl">
-      <h1 className="text-3xl font-bold text-center mb-6">
-        速読フラッシュリーダー
-      </h1>
+      <h1 className="text-3xl font-bold text-center mb-6">速読フラッシュリーダー</h1>
+      {settingsFeedback}
 
       <div className="grid gap-6">
         <Card>
@@ -281,12 +359,24 @@ export default function FlashReader() {
               onChange={handleImport} disabled={importing} />
             {importing && <output className="block">取り込み中...</output>}
             {importError && <p role="alert" className="text-destructive">{importError}</p>}
-            {books.map((book) => (
-              <div key={book.documentId} className="flex items-center justify-between gap-2">
-                <span className="truncate">{book.title}</span>
-                <Button variant="outline" onClick={() => openBook(book)}>続きから</Button>
-              </div>
-            ))}
+            {recentBook && <p className="text-sm">最近読んだ本：{recentBook.title}</p>}
+            {recentBook && <Button variant="outline" onClick={() => openBook(recentBook)}>最近の本の続きから</Button>}
+            {sortedBooks.map((book) => {
+              const saved = bookStates[book.documentId];
+              return (
+                <div key={book.documentId} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                  <span className="truncate">{book.title}</span>
+                  <Button variant="outline" onClick={() => openBook(book)}>続きから</Button>
+                  <p className="col-span-2 text-sm text-muted-foreground">
+                    {saved ? <>
+                      {saved.completed ? "読了" : saved.updatedAt || saved.offset > 0 ? "読書中" : "未読"}
+                      {` · ${readingProgress(saved.offset, lengths.get(book.documentId) ?? 0, saved.completed)}% · 最終読書：`}
+                      {saved.updatedAt ? <time dateTime={saved.updatedAt}>{new Date(saved.updatedAt).toLocaleString("ja-JP")}</time> : "記録なし"}
+                    </> : "保存情報を読み込めません"}
+                  </p>
+                </div>
+              );
+            })}
             {activeBook && <p className="text-sm text-muted-foreground">{activeBook.title}・取り込み済み範囲</p>}
           </CardContent>
         </Card>
@@ -294,10 +384,12 @@ export default function FlashReader() {
           <CardHeader>
             <CardTitle>テキスト入力</CardTitle>
             <CardDescription>
-              速読したいテキストを入力してください
+              {activeBook ? "取り込んだ本は読み取り専用です。新しい入力に戻っても本と保存済みの位置は本棚に残ります。" : "貼り付けたテキストはこの画面内だけで保持します。ページを閉じると失われます。"}
             </CardDescription>
+            <Button variant="outline" onClick={() => openNewText()}>新しいテキスト</Button>
           </CardHeader>
           <CardContent>
+            {draftWarning && <p role="alert" className="mb-2 text-destructive">直前の読書位置は保存を確認できていません。本棚からは最後に保存できた位置で再開します。</p>}
             <Textarea
               placeholder="ここに長文テキストを入力または貼り付けてください..."
               className="min-h-[150px]"
@@ -309,17 +401,12 @@ export default function FlashReader() {
               <Button
                 variant="outline"
                 onClick={() => {
-                  closeSource();
-                  setActiveBook(null);
-                  setInputText(`「あれ、意外と読める」と気づきました。フラッシュテキストで文章を読んでみたら、普段より早く読めるんです。目線を左右に動かす必要がないから、自然と読むスピードが上がるみたい。
+                  const sample = `「あれ、意外と読める」と気づきました。フラッシュテキストで文章を読んでみたら、普段より早く読めるんです。目線を左右に動かす必要がないから、自然と読むスピードが上がるみたい。
 
 長文を読む時って、目線を右から左に動かすのが意外と時間を取るんですよね。でもフラッシュテキストなら、文字が目の前に表示されるから、その分だけ早く読める。最初は「こんな速さで読めるの？」って思ったけど、使ってみたら意外と自然に読めました。
 
-友達と一緒に試してみたら、「確かに目線の移動がない分、読みやすいね」って言ってました。一度試してみると、その違いが分かるかもしれません。`);
-                  setChunks([]);
-                  setCurrentChunkIndex(0);
-                  setProgress(0);
-                  setIsPlaying(false);
+友達と一緒に試してみたら、「確かに目線の移動がない分、読みやすいね」って言ってました。一度試してみると、その違いが分かるかもしれません。`;
+                  openNewText(sample);
                 }}
               >
                 サンプルのテキストを入力
@@ -334,7 +421,7 @@ export default function FlashReader() {
               <CardTitle>フラッシュ表示</CardTitle>
               <Sheet>
                 <SheetTrigger asChild>
-                  <Button variant="outline" size="icon">
+                  <Button variant="outline" size="icon" aria-label="読書設定">
                     <Settings className="h-4 w-4" />
                   </Button>
                 </SheetTrigger>
@@ -345,6 +432,7 @@ export default function FlashReader() {
                       速度とチャンクサイズを調整します
                     </SheetDescription>
                   </SheetHeader>
+                  {settingsFeedback}
                   <div className="space-y-4">
                     <div>
                       <h3 className="text-sm font-medium mb-3">速度設定</h3>
@@ -352,7 +440,7 @@ export default function FlashReader() {
                         value={speedMode}
                         onValueChange={(value) =>
                           handleSpeedPresetChange(
-                            value as "low" | "mid" | "high" | "custom"
+                            value as SpeedMode
                           )
                         }
                         className="flex flex-col space-y-2"
@@ -386,7 +474,7 @@ export default function FlashReader() {
                           min={100}
                           max={1000}
                           step={10}
-                          onValueChange={(value) => setSpeed(value[0])}
+                          onValueChange={(value) => applySettings({ speed: value[0], chunkSize, speedMode })}
                         />
                       </div>
                     )}
@@ -401,7 +489,7 @@ export default function FlashReader() {
                         min={1}
                         max={10}
                         step={1}
-                        onValueChange={(value) => setChunkSize(value[0])}
+                        onValueChange={(value) => applySettings({ speed, chunkSize: value[0], speedMode })}
                       />
                     </div>
                   </div>
@@ -410,6 +498,8 @@ export default function FlashReader() {
             </div>
           </CardHeader>
           <CardContent>
+            {positionNotice && <output className="mb-4 block">{positionNotice}</output>}
+            {completed && <output className="mb-4 block">{activeBook && (positionReadError || positionSaveError) ? "読了（未保存）" : "読了"}</output>}
             {activeBook && positionReadError && (
               <div role="alert" className="mb-4 space-y-2 text-destructive">
                 <p>読書位置を読み込めません。先頭から一時的に開いています。保存済みの位置は上書きしません。</p>
@@ -419,7 +509,7 @@ export default function FlashReader() {
             {activeBook && !positionReadError && positionSaveError && (
               <div role="alert" className="mb-4 space-y-2 text-destructive">
                 <p>読書位置を保存できません。別の本を開いたりページを閉じると、最後に保存できた位置に戻ります。</p>
-                <Button variant="outline" onClick={() => persistPosition(activeBook, chunks[currentChunkIndex]?.start ?? 0)}>保存を再試行</Button>
+                <Button variant="outline" onClick={() => persistPosition(activeBook, position, completed)}>保存を再試行</Button>
               </div>
             )}
             <div className="flex flex-col items-center">
@@ -456,12 +546,13 @@ export default function FlashReader() {
                       setCurrentChunkIndex((index) => index + 1);
                       setIsPlaying(true);
                     } else {
-                      setProgress(100);
+                      setIsPlaying(false);
+                      setCompleted(true);
                     }
                   }}>確認して続ける</Button>
                 )}
                 {!isPlaying ? (
-                  <Button onClick={startReading} disabled={!inputText.trim()}>
+                  <Button onClick={startReading} disabled={!inputText.trim() || completed}>
                     <Play className="mr-2 h-4 w-4" /> 開始
                   </Button>
                 ) : (
@@ -474,7 +565,7 @@ export default function FlashReader() {
                   onClick={resetReading}
                   disabled={chunks.length === 0}
                 >
-                  <RotateCcw className="mr-2 h-4 w-4" /> リセット
+                  <RotateCcw className="mr-2 h-4 w-4" /> 最初から読む
                 </Button>
               </div>
               {sourceUrl && (

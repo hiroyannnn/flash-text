@@ -1,5 +1,11 @@
 export type Chunk = { text: string; start: number; end: number; blockId?: string; review?: boolean };
 
+/** Entering the final chunk is not completion; only its elapsed display time is. */
+export function readingProgress(offset: number, total: number, completed: boolean): number {
+  if (completed) return 100;
+  return total > 0 ? Math.max(0, Math.min(99, Math.floor((offset / total) * 100))) : 0;
+}
+
 /** Positions use Unicode code points, so a display change can keep its place. */
 export function splitIntoChunks(text: string, size: number, anchor = 0): Chunk[] {
   if (size < 1) throw new RangeError("Chunk size must be positive");
