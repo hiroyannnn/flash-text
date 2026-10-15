@@ -5,6 +5,8 @@ import Page from "./page";
 import { importEpub, readingText, type BookDocument } from "@/lib/book";
 import { bookLength, listBooks, saveBook, savePosition } from "@/lib/book-store";
 import { SETTINGS_KEY, saveReaderSettings } from "@/lib/reader-settings";
+import * as bookStore from "@/lib/book-store";
+import { createTextDocument, MAX_TEXT_BYTES } from "@/lib/text-document";
 
 describe("FlashReader", () => {
   it("リセットボタンをクリックすると、再生状態と進捗がリセットされる", async () => {
@@ -130,7 +132,7 @@ const savedPosition = (book: BookDocument) =>
 
 async function importFile(file: File) {
   const input = screen.getByLabelText("本のファイルを選ぶ");
-  fireEvent.change(input, { target: { files: [file] } });
+  await act(async () => { fireEvent.change(input, { target: { files: [file] } }); });
   await waitFor(() => expect(input).not.toBeDisabled());
 }
 
@@ -658,4 +660,178 @@ describe("EPUB取り込みから続きからまでの統合受入", () => {
     expect(flashText()).toBe("おか🍣きく");
     expectStopped();
   });
+});
+
+describe("貼り付け本文の保存と復元 (HIR-75)", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  const paste = (text: string) => fireEvent.change(screen.getByRole("textbox", { name: "" }), { target: { value: text } });
+  async function startText(text: string) {
+    paste(text);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "開始" })); });
+    await waitFor(() => expect(screen.getByLabelText("タイトル")).not.toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: "一時停止" }));
+  }
+
+  it("開始だけで独立したA/Bを保存し、名前・速度・チャンク・本別位置を再起動後に停止状態で復元する", async () => {
+    saveReaderSettings({ speed: 470, speedMode: "custom", chunkSize: 6 });
+    const { unmount } = await renderReadyPage();
+    const raw = "文章A😀\nあいうえおかきくけこさしすせそ";
+    await startText(raw);
+    await readChunks(2);
+    const a = await storedBook("文章A😀");
+    const stateA = savedPosition(a);
+    const displayA = flashText();
+    fireEvent.change(screen.getByLabelText("タイトル"), { target: { value: "名前を変えたA" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "タイトルを保存" })); });
+    expect(savedPosition(a)).toMatchObject({ ...stateA, updatedAt: expect.any(String) });
+    fireEvent.click(screen.getByRole("button", { name: "新しいテキスト" }));
+    await startText("文章B\nたちつてとなにぬねのはひふへほまみむめも");
+    await readChunks(1);
+    const b = await storedBook("文章B");
+    const stateB = savedPosition(b);
+    const displayB = flashText();
+    await reload(unmount);
+    fireEvent.click(resumeButton("名前を変えたA"));
+    expect(screen.getByPlaceholderText("ここに長文テキストを入力または貼り付けてください...")).toHaveValue(raw);
+    expect(flashText()).toBe(displayA);
+    expectStopped();
+    openSettings();
+    expect(screen.getByText(/470/)).toBeInTheDocument();
+    expect(screen.getByText("チャンクサイズ: 6 文字")).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    fireEvent.click(resumeButton("文章B"));
+    expect(flashText()).toBe(displayB);
+    expectStopped();
+    expect(savedPosition(a)).toMatchObject({ ...stateA, updatedAt: expect.any(String) });
+    expect(savedPosition(b)).toMatchObject({ ...stateB, updatedAt: expect.any(String) });
+  });
+
+  it.each(["QuotaExceededError", "SecurityError", "missing"])("本文保存の%sでも読めて、完読後の再試行で重複せず保存する", async (name) => {
+    await renderReadyPage();
+    const real = indexedDB;
+    if (name === "missing") vi.stubGlobal("indexedDB", undefined);
+    else vi.spyOn(indexedDB, "open").mockImplementation(() => { throw new DOMException("denied", name); });
+    paste("か\u3099😀");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "開始" })); });
+    expect(screen.getByText(/本文を保存できません/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "続きから" })).not.toBeInTheDocument();
+    await advanceReading(400);
+    expect(screen.getByText("読了（未保存）")).toBeInTheDocument();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.stubGlobal("indexedDB", real);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "本文の保存を再試行" })); });
+    const book = (await listBooks())[0];
+    expect((await listBooks())).toHaveLength(1);
+    expect(savedPosition(book)).toMatchObject({ offsetCp: 3, completed: true });
+    expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "100");
+    expectStopped();
+  });
+
+  it("初回からIndexedDBがなくても本棚と本文保存の失敗を表示し、入力を保つ", async () => {
+    vi.stubGlobal("indexedDB", undefined);
+    await renderReadyPage();
+    expect(screen.getByText(/本棚を読み込めませんでした/)).toBeInTheDocument();
+    paste("保存拒否の合成本文");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "開始" })); });
+    expect(screen.getByText(/本文を保存できません/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toHaveValue("保存拒否の合成本文");
+  });
+
+  it("UTF-8 txtを保存し、不正・空・巨大・容量不足の取り込みでも既存本文と位置を保つ", async () => {
+    await renderReadyPage();
+    await importFile(fileFromBytes("synthetic.txt", new TextEncoder().encode("合成txt😀\r\nあいうえおかきくけこさしすせそ")));
+    await readChunks(1);
+    const book = await storedBook("合成txt😀");
+    const before = savedPosition(book);
+    const display = flashText();
+    for (const bytes of [new Uint8Array(), new Uint8Array([0xff]), new Uint8Array(MAX_TEXT_BYTES + 1)]) {
+      await importFile(fileFromBytes("invalid.txt", bytes));
+      expect(screen.getByRole("alert")).toBeInTheDocument();
+      expect(flashText()).toBe(display);
+      expect(savedPosition(book)).toEqual(before);
+    }
+    const denied = vi.spyOn(indexedDB, "open").mockImplementation(() => { throw new DOMException("quota", "QuotaExceededError"); });
+    await importFile(fileFromBytes("full.txt", new TextEncoder().encode("保存できない合成本文")));
+    expect(flashText()).toBe(display);
+    expect(savedPosition(book)).toEqual(before);
+    denied.mockRestore();
+    expect(await listBooks()).toEqual([book]);
+  });
+
+  it("破損した保存本文を隔離し、本棚再読込拒否でも画面と健康な本を保つ", async () => {
+    const good = createTextDocument("正常な本文😀");
+    await bookStore.saveTextBook(good);
+    await saveBook({ ...good, documentId: "text:broken", plainText: "不一致" });
+    await renderReadyPage();
+    fireEvent.click(resumeButton(good.title));
+    expect(screen.getByText(/1件の本文を読み込めません/)).toBeInTheDocument();
+    const denied = vi.spyOn(indexedDB, "open").mockImplementation(() => { throw new DOMException("denied", "SecurityError"); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "本棚を再読込" })); });
+    expect(screen.getByText(/本棚を読み込めませんでした/)).toBeInTheDocument();
+    expect(resumeButton(good.title)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("ここに長文テキストを入力または貼り付けてください...")).toHaveValue(good.plainText);
+    denied.mockRestore();
+  });
+
+  it("タイトル保存の失敗でも元の本文・題名・位置を残す", async () => {
+    await renderReadyPage();
+    await startText("変更前の合成タイトル\n本文あいうえおかきくけこさしすせそ");
+    await readChunks(1);
+    const a = await storedBook("変更前の合成タイトル");
+    const position = savedPosition(a);
+    fireEvent.change(screen.getByLabelText("タイトル"), { target: { value: "新しい名前" } });
+    const denied = vi.spyOn(indexedDB, "open").mockImplementation(() => { throw new DOMException("quota", "QuotaExceededError"); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "タイトルを保存" })); });
+    expect(screen.getByText(/タイトルを保存できません/)).toBeInTheDocument();
+    expect(resumeButton(a.title)).toBeInTheDocument();
+    denied.mockRestore();
+    expect(await listBooks()).toEqual([a]);
+    expect(savedPosition(a)).toEqual(position);
+  });
+});
+
+it("初期本棚の遅い読み込みが、直後に保存した本文を一覧から消さない", async () => {
+  localStorage.clear();
+  let finishLoad: ((value: { books: BookDocument[]; unreadable: number }) => void) | undefined;
+  const load = vi.spyOn(bookStore, "listSavedBooks").mockImplementationOnce(() => new Promise((resolve) => { finishLoad = resolve; }));
+  try {
+    await renderReadyPage();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "読み込み競合の合成本文あいうえおかきくけこ" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "開始" })); });
+    await screen.findByLabelText("タイトル");
+    fireEvent.click(screen.getByRole("button", { name: "一時停止" }));
+    await act(async () => { finishLoad?.({ books: [], unreadable: 0 }); });
+    expect(resumeButton("読み込み競合の合成本文あいうえおかきくけこ")).toBeInTheDocument();
+    expect(await listBooks()).toHaveLength(1);
+  } finally { load.mockRestore(); }
+});
+
+it("保存待ち中も読み始められ、連打で重複せず、完了後に現在位置を保存する", async () => {
+  localStorage.clear();
+  await renderReadyPage();
+  const save = bookStore.saveTextBook;
+  let finishSave: (() => Promise<BookDocument>) | undefined;
+  const delayed = vi.spyOn(bookStore, "saveTextBook").mockImplementationOnce((book) => new Promise((resolve, reject) => {
+    finishSave = async () => { try { const stored = await save(book); resolve(stored); return stored; } catch (error) { reject(error); throw error; } };
+  }));
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "保存待ちでも読む合成本文あいうえおかきくけこ" } });
+    fireEvent.click(screen.getByRole("button", { name: "開始" }));
+    expect(screen.getByText("本文を保存中...")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新しいテキスト" })).toBeDisabled();
+    await advanceReading(1000);
+    fireEvent.click(screen.getByRole("button", { name: "一時停止" }));
+    expect(screen.getByRole("button", { name: "開始" })).toBeDisabled();
+    const displayed = flashText();
+    await act(async () => { await finishSave?.(); });
+    expect(delayed).toHaveBeenCalledTimes(1);
+    expect(flashText()).toBe(displayed);
+    expect(savedPosition((await listBooks())[0])).toMatchObject({ offsetCp: 5, completed: false });
+    expectStopped();
+  } finally { delayed.mockRestore(); vi.useRealTimers(); }
 });

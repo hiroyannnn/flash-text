@@ -6,6 +6,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Play, Pause, RotateCcw, Settings } from "lucide-react";
 import {
   Sheet,
@@ -26,15 +27,27 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { chunkIndexAt, displayDurationMs, readingProgress, splitIntoChunks, type Chunk } from "@/lib/reading";
 import { bookChunks, importEpub, readingText, type BookDocument } from "@/lib/book";
-import { bookLength, getSourceImage, listBooks, loadReadingState, saveBook, saveFlashbook, savePosition, type ReadingState } from "@/lib/book-store";
+import { bookLength, getSourceImage, listSavedBooks, loadReadingState, renameTextBook, saveBook, saveFlashbook, savePosition, saveTextBook, type ReadingState } from "@/lib/book-store";
 import { importFlashbook } from "@/lib/flashbook";
 import { DEFAULT_SETTINGS, loadReaderSettings, saveReaderSettings, type ReaderSettings, type SpeedMode } from "@/lib/reader-settings";
+import { createTextDocument, importTextFile, textTitle } from "@/lib/text-document";
 
 export default function FlashReader() {
   const [inputText, setInputText] = useState("");
   const [draftText, setDraftText] = useState("");
   const [draftWarning, setDraftWarning] = useState(false);
+  const [bodySaveError, setBodySaveError] = useState("");
+  const [savingText, setSavingText] = useState(false);
+  const pendingText = useRef<BookDocument | null>(null);
+  const textSaveInFlight = useRef(false);
+  const mounted = useRef(false);
+  const shelfVersion = useRef(0);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleError, setTitleError] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const [books, setBooks] = useState<BookDocument[]>([]);
+  const [bookLoadError, setBookLoadError] = useState(false);
+  const [unreadableBooks, setUnreadableBooks] = useState(0);
   const [bookStates, setBookStates] = useState<Record<string, ReadingState | null>>({});
   const [activeBook, setActiveBook] = useState<BookDocument | null>(null);
   const [importError, setImportError] = useState("");
@@ -63,6 +76,7 @@ export default function FlashReader() {
     Date.parse(bookStates[b.documentId]?.updatedAt ?? "1970-01-01") -
     Date.parse(bookStates[a.documentId]?.updatedAt ?? "1970-01-01")), [books, bookStates]);
   const recentBook = sortedBooks.find((book) => bookStates[book.documentId]?.updatedAt);
+  const busy = savingText || importing || savingTitle;
 
   // Split text into Unicode code points, keeping stable text offsets.
   const processText = () => {
@@ -77,6 +91,10 @@ export default function FlashReader() {
   };
 
   const startReading = () => {
+    if (!activeBook) {
+      void saveDraft(true);
+      return;
+    }
     if (chunks.length === 0) {
       const initial = activeBook ? bookChunks(activeBook, chunkSize) : splitIntoChunks(inputText, chunkSize);
       setChunks(initial);
@@ -87,6 +105,66 @@ export default function FlashReader() {
       return;
     }
     setIsPlaying(true);
+  };
+
+  const putOnShelf = (book: BookDocument) => {
+    shelfVersion.current += 1;
+    setBooks((saved) => [...saved.filter((item) => item.documentId !== book.documentId), book]);
+  };
+
+  const saveDraft = async (play: boolean) => {
+    if (activeBook || textSaveInFlight.current) return;
+    let book: BookDocument;
+    try {
+      book = pendingText.current?.plainText === inputText.replace(/^\uFEFF/, "") ? pendingText.current : createTextDocument(inputText);
+    } catch (error) {
+      setBodySaveError(error instanceof Error ? error.message : "本文を確認できません");
+      return;
+    }
+    pendingText.current = book;
+    textSaveInFlight.current = true;
+    setSavingText(true);
+    setBodySaveError("");
+    if (!chunks.length) {
+      setChunks(bookChunks(book, chunkSize));
+      setCurrentChunkIndex(0);
+    }
+    if (play && !completed) setIsPlaying(true);
+    try {
+      const saved = await saveTextBook(book);
+      if (!mounted.current) return;
+      putOnShelf(saved);
+      setActiveBook(saved);
+      setTitleDraft(saved.title);
+      setTitleError("");
+      setPositionReadError(false);
+      setPositionNotice("");
+      setDraftWarning(false);
+      pendingText.current = null;
+    } catch {
+      if (mounted.current) setBodySaveError("本文を保存できません。この画面では読めますが、ページを閉じると失われます。");
+    } finally {
+      textSaveInFlight.current = false;
+      if (mounted.current) setSavingText(false);
+    }
+  };
+
+  const saveTitle = async () => {
+    if (!activeBook || activeBook.sourceKind !== "text" || savingTitle) return;
+    let title: string;
+    try { title = textTitle(titleDraft); }
+    catch (error) { setTitleError(error instanceof Error ? error.message : "タイトルを確認してください"); return; }
+    setSavingTitle(true);
+    setTitleError("");
+    try {
+      const saved = await renameTextBook(activeBook.documentId, title);
+      if (!mounted.current) return;
+      putOnShelf(saved);
+      setActiveBook(saved);
+      setTitleDraft(saved.title);
+    } catch {
+      if (mounted.current) setTitleError("タイトルを保存できません。変更前の名前は残っています。もう一度お試しください。");
+    } finally { if (mounted.current) setSavingTitle(false); }
   };
 
   // Pausing never advances to a chunk that has not been displayed.
@@ -105,6 +183,8 @@ export default function FlashReader() {
     setActiveBook(null);
     setInputText(e.target.value);
     setDraftText(e.target.value);
+    pendingText.current = null;
+    setBodySaveError("");
     setChunks([]);
     setCurrentChunkIndex(0);
     setCompleted(false);
@@ -113,11 +193,14 @@ export default function FlashReader() {
 
   const openBook = (book: BookDocument) => {
     closeSource();
-    const text = readingText(book);
+    const text = book.sourceKind === "text" ? book.plainText ?? readingText(book) : readingText(book);
     let offset = 0;
     let isCompleted = false;
     setPositionNotice("");
     setDraftWarning(false);
+    setBodySaveError("");
+    setTitleDraft(book.title);
+    setTitleError("");
     try {
       const saved = loadReadingState(book);
       offset = saved.offset;
@@ -153,10 +236,11 @@ export default function FlashReader() {
       } else if (file.name.toLowerCase().endsWith(".epub")) {
         book = await importEpub(file);
         await saveBook(book);
-      } else throw new Error("EPUBまたは.flashbook.zipを選んでください");
-      const savedBooks = await listBooks();
-      setBooks(savedBooks);
-      refreshBookStates(savedBooks);
+      } else if (file.name.toLowerCase().endsWith(".txt")) {
+        book = await saveTextBook(await importTextFile(file));
+      } else throw new Error("EPUB、UTF-8の.txt、.flashbook.zipを選んでください");
+      putOnShelf(book);
+      void reloadBooks();
       openBook(book);
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "取り込みに失敗しました");
@@ -205,6 +289,9 @@ export default function FlashReader() {
     setPositionReadError(false);
     setPositionSaveError(false);
     setPositionNotice("");
+    pendingText.current = null;
+    setBodySaveError("");
+    setTitleError("");
   };
 
   const refreshBookStates = useCallback((savedBooks: BookDocument[]) => {
@@ -215,6 +302,18 @@ export default function FlashReader() {
     }
     setBookStates(states);
   }, []);
+
+  const reloadBooks = useCallback(async () => {
+    const version = shelfVersion.current;
+    try {
+      const saved = await listSavedBooks();
+      if (!mounted.current || version !== shelfVersion.current) return;
+      setBooks(saved.books);
+      setUnreadableBooks(saved.unreadable);
+      setBookLoadError(false);
+      refreshBookStates(saved.books);
+    } catch { if (mounted.current) setBookLoadError(true); }
+  }, [refreshBookStates]);
 
   const restoreSettings = useCallback(() => {
     try {
@@ -250,18 +349,10 @@ export default function FlashReader() {
   }, []);
 
   useEffect(() => {
-    if (!("indexedDB" in window)) return;
-    let mounted = true;
-    listBooks().then((saved) => {
-      if (mounted) {
-        setBooks(saved);
-        refreshBookStates(saved);
-      }
-    }).catch(() => {
-      if (mounted) setImportError("保存済みの本を開けませんでした");
-    });
-    return () => { mounted = false; };
-  }, [refreshBookStates]);
+    mounted.current = true;
+    void reloadBooks();
+    return () => { mounted.current = false; };
+  }, [reloadBooks]);
 
   const persistPosition = useCallback((book: BookDocument, offset: number, isCompleted: boolean) => {
     try {
@@ -352,21 +443,25 @@ export default function FlashReader() {
         <Card>
           <CardHeader>
             <CardTitle>本を取り込む</CardTitle>
-            <CardDescription>公式EPUBまたは取得済み画面の読書用ZIPを端末内に保存します</CardDescription>
+            <CardDescription>EPUB、UTF-8の.txt（1MiBまで）、読書用ZIPをこのブラウザ内に保存します</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <input type="file" accept=".epub,.zip,application/epub+zip" aria-label="本のファイルを選ぶ"
-              onChange={handleImport} disabled={importing} />
+            <input type="file" accept=".epub,.txt,.zip,application/epub+zip,text/plain" aria-label="本のファイルを選ぶ"
+              onChange={handleImport} disabled={busy} />
             {importing && <output className="block">取り込み中...</output>}
             {importError && <p role="alert" className="text-destructive">{importError}</p>}
+            {(bookLoadError || unreadableBooks > 0) && <div role="alert" className="space-y-2 text-destructive">
+              <p>{bookLoadError ? "本棚を読み込めませんでした。表示中の本文は残しています。" : `${unreadableBooks}件の本文を読み込めません。元データは削除していません。`}</p>
+              <Button variant="outline" disabled={busy} onClick={() => void reloadBooks()}>本棚を再読込</Button>
+            </div>}
             {recentBook && <p className="text-sm">最近読んだ本：{recentBook.title}</p>}
-            {recentBook && <Button variant="outline" onClick={() => openBook(recentBook)}>最近の本の続きから</Button>}
+            {recentBook && <Button variant="outline" disabled={busy} onClick={() => openBook(recentBook)}>最近の本の続きから</Button>}
             {sortedBooks.map((book) => {
               const saved = bookStates[book.documentId];
               return (
                 <div key={book.documentId} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                   <span className="truncate">{book.title}</span>
-                  <Button variant="outline" onClick={() => openBook(book)}>続きから</Button>
+                  <Button variant="outline" disabled={busy} onClick={() => openBook(book)}>続きから</Button>
                   <p className="col-span-2 text-sm text-muted-foreground">
                     {saved ? <>
                       {saved.completed ? "読了" : saved.updatedAt || saved.offset > 0 ? "読書中" : "未読"}
@@ -384,22 +479,35 @@ export default function FlashReader() {
           <CardHeader>
             <CardTitle>テキスト入力</CardTitle>
             <CardDescription>
-              {activeBook ? "取り込んだ本は読み取り専用です。新しい入力に戻っても本と保存済みの位置は本棚に残ります。" : "貼り付けたテキストはこの画面内だけで保持します。ページを閉じると失われます。"}
+              {activeBook ? "保存済みの本文は読み取り専用です。新しい入力に戻っても本文と保存済みの位置は本棚に残ります。" : "開始時に本文をこのブラウザへ保存します（1MiBまで）。保存できないときは、その場でお知らせします。"}
             </CardDescription>
-            <Button variant="outline" onClick={() => openNewText()}>新しいテキスト</Button>
+            <Button variant="outline" disabled={busy} onClick={() => openNewText()}>新しいテキスト</Button>
           </CardHeader>
           <CardContent>
             {draftWarning && <p role="alert" className="mb-2 text-destructive">直前の読書位置は保存を確認できていません。本棚からは最後に保存できた位置で再開します。</p>}
+            {savingText && <output className="mb-2 block">本文を保存中...</output>}
+            {bodySaveError && <div role="alert" className="mb-2 space-y-2 text-destructive">
+              <p>{bodySaveError}</p>
+              {pendingText.current && <Button variant="outline" disabled={busy} onClick={() => void saveDraft(false)}>本文の保存を再試行</Button>}
+            </div>}
+            {activeBook?.sourceKind === "text" && <div className="mb-3 space-y-2">
+              <Label htmlFor="saved-text-title">タイトル</Label>
+              <Input id="saved-text-title" value={titleDraft} maxLength={120} disabled={busy} onChange={(event) => setTitleDraft(event.target.value)} />
+              <Button variant="outline" disabled={busy || titleDraft.trim() === activeBook.title} onClick={() => void saveTitle()}>タイトルを保存</Button>
+              {titleError && <p role="alert" className="text-destructive">{titleError}</p>}
+            </div>}
             <Textarea
               placeholder="ここに長文テキストを入力または貼り付けてください..."
               className="min-h-[150px]"
               value={inputText}
               onChange={handleTextChange}
               readOnly={activeBook !== null}
+              disabled={busy}
             />
             <div className="mt-4">
               <Button
                 variant="outline"
+                disabled={busy}
                 onClick={() => {
                   const sample = `「あれ、意外と読める」と気づきました。フラッシュテキストで文章を読んでみたら、普段より早く読めるんです。目線を左右に動かす必要がないから、自然と読むスピードが上がるみたい。
 
@@ -499,7 +607,7 @@ export default function FlashReader() {
           </CardHeader>
           <CardContent>
             {positionNotice && <output className="mb-4 block">{positionNotice}</output>}
-            {completed && <output className="mb-4 block">{activeBook && (positionReadError || positionSaveError) ? "読了（未保存）" : "読了"}</output>}
+            {completed && <output className="mb-4 block">{activeBook && bookStates[activeBook.documentId]?.completed && !positionReadError && !positionSaveError ? "読了" : "読了（未保存）"}</output>}
             {activeBook && positionReadError && (
               <div role="alert" className="mb-4 space-y-2 text-destructive">
                 <p>読書位置を読み込めません。先頭から一時的に開いています。保存済みの位置は上書きしません。</p>
@@ -552,7 +660,7 @@ export default function FlashReader() {
                   }}>確認して続ける</Button>
                 )}
                 {!isPlaying ? (
-                  <Button onClick={startReading} disabled={!inputText.trim() || completed}>
+                  <Button onClick={startReading} disabled={!inputText.trim() || completed || busy}>
                     <Play className="mr-2 h-4 w-4" /> 開始
                   </Button>
                 ) : (

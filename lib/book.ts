@@ -6,7 +6,8 @@ export type BookDocument = {
   revisionId: string;
   title: string;
   language: "ja";
-  sourceKind: "epub" | "kindle-capture";
+  sourceKind: "epub" | "kindle-capture" | "text";
+  plainText?: string;
   coverage: "full-user-confirmed" | "unknown" | "partial";
   units: { id: string; ordinal: number; epubHref?: string; imagePath?: string; imageSha256?: string; widthPx?: number; heightPx?: number }[];
   blocks: ({

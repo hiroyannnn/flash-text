@@ -1,4 +1,5 @@
 import { blockText, type BookDocument } from "./book";
+import { textTitle, validTextDocument } from "./text-document";
 
 const DB_NAME = "flash-text-books";
 const STORE_NAME = "books";
@@ -54,6 +55,7 @@ async function request<T>(mode: IDBTransactionMode, operation: (store: IDBObject
       action.onsuccess = () => { result = action.result; };
       action.onerror = () => reject(action.error);
       transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error ?? new Error("保存処理が中断されました"));
       transaction.oncomplete = () => resolve(result);
     });
   } finally {
@@ -97,8 +99,69 @@ export async function getSourceImage(book: BookDocument, unitId: string): Promis
   }
 }
 
-export function listBooks(): Promise<BookDocument[]> {
-  return request("readonly", (store) => store.getAll());
+function readableBook(value: unknown): value is BookDocument {
+  if (!value || typeof value !== "object") return false;
+  const book = value as BookDocument;
+  if (book.sourceKind === "text") return validTextDocument(book);
+  return book.schemaVersion === 1 && ["epub", "kindle-capture"].includes(book.sourceKind) &&
+    typeof book.documentId === "string" && !!book.documentId && typeof book.revisionId === "string" && !!book.revisionId &&
+    typeof book.title === "string" && !!book.title && Array.isArray(book.units) &&
+    Array.isArray(book.blocks) && book.blocks.length > 0 && book.blocks.every((block) =>
+      block && typeof block.id === "string" && (block.kind === "review"
+        ? Array.isArray(block.sourceUnitIds)
+        : ["paragraph", "heading"].includes(block.kind) && typeof block.canonicalText === "string" && Array.isArray(block.sourceSpans)));
+}
+
+export async function listSavedBooks(): Promise<{ books: BookDocument[]; unreadable: number }> {
+  const records = await request<unknown[]>("readonly", (store) => store.getAll());
+  const books = records.filter(readableBook);
+  return { books, unreadable: records.length - books.length };
+}
+
+export async function listBooks(): Promise<BookDocument[]> {
+  return (await listSavedBooks()).books;
+}
+
+async function changeTextBook(id: string, change: (stored: unknown) => BookDocument): Promise<BookDocument> {
+  const db = await openDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readwrite");
+      const store = transaction.objectStore(STORE_NAME);
+      const lookup = store.get(id);
+      let result: BookDocument | undefined;
+      let failure: unknown;
+      lookup.onsuccess = () => {
+        try {
+          result = change(lookup.result);
+          if (lookup.result === undefined) store.add(result);
+          else if (result !== lookup.result) store.put(result);
+        } catch (error) {
+          failure = error;
+          transaction.abort();
+        }
+      };
+      transaction.oncomplete = () => result ? resolve(result) : reject(new Error("本文を確認できませんでした"));
+      transaction.onerror = transaction.onabort = () => reject(failure ?? transaction.error ?? new Error("保存処理が中断されました"));
+    });
+  } finally { db.close(); }
+}
+
+export async function saveTextBook(book: BookDocument): Promise<BookDocument> {
+  if (!validTextDocument(book)) throw new Error("テキストの保存データを確認できません");
+  return changeTextBook(book.documentId, (stored) => {
+    if (stored === undefined) return book;
+    if (validTextDocument(stored) && stored.revisionId === book.revisionId && stored.plainText === book.plainText) return stored;
+    throw new Error("別の保存済み文書は上書きしません");
+  });
+}
+
+export async function renameTextBook(id: string, title: string): Promise<BookDocument> {
+  const nextTitle = textTitle(title);
+  return changeTextBook(id, (stored) => {
+    if (!validTextDocument(stored)) throw new Error("保存済みの本文を確認できません");
+    return stored.title === nextTitle ? stored : { ...stored, title: nextTitle };
+  });
 }
 
 export function savePosition(book: BookDocument, offset: number, completed = false): ReadingState {
