@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BookDocument } from "./book";
 import { loadPosition, savePosition } from "./book-store";
 
@@ -11,9 +11,18 @@ const book: BookDocument = {
   ],
 };
 
-afterEach(() => localStorage.clear());
+afterEach(() => {
+  vi.restoreAllMocks();
+  localStorage.clear();
+});
 
 describe("reading position", () => {
+  it("surfaces storage read failures instead of treating them as position zero", () => {
+    const error = new DOMException("storage unavailable", "SecurityError");
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw error; });
+    expect(() => loadPosition(book)).toThrow("storage unavailable");
+  });
+
   it("restores the same code point in the second block", () => {
     savePosition(book, 5); // 3 code points, a separator, then 1 code point.
     expect(loadPosition(book)).toBe(5);

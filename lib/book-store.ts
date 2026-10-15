@@ -93,8 +93,10 @@ export function savePosition(book: BookDocument, offset: number): void {
 }
 
 export function loadPosition(book: BookDocument): number {
+  // Storage access failures must reach the UI so it cannot overwrite an unread bookmark.
+  const raw = localStorage.getItem(`flash-position:${book.documentId}`);
   try {
-    const saved = JSON.parse(localStorage.getItem(`flash-position:${book.documentId}`) ?? "null");
+    const saved = JSON.parse(raw ?? "null");
     if (saved?.revisionId !== book.revisionId || !Number.isInteger(saved.offsetCp) || saved.offsetCp < 0) return 0;
     let offset = 0;
     for (const block of book.blocks) {

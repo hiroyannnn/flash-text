@@ -176,6 +176,7 @@ describe("EPUB取り込みから続きからまでの統合受入", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("日本語と絵文字のEPUBを取り込むと、本棚に題名が出てIndexedDBに残る", async () => {
@@ -240,6 +241,103 @@ describe("EPUB取り込みから続きからまでの統合受入", () => {
     expectStopped();
     expect(savedPosition(a)).toMatchObject({ blockId: "b2", offsetCp: 0 });
     expect(savedPosition(b)).toMatchObject({ blockId: "b2", offsetCp: 5 });
+  });
+
+  it.each(["QuotaExceededError", "SecurityError"])("位置保存の%sでも画面と直前の保存値を保ち、現在位置を再保存できる", async (errorName) => {
+    const { unmount } = render(<Page />);
+    await importFile(await bookA());
+    await screen.findByText(BOOK_A, { selector: "span" });
+    await readChunks(2);
+    const book = await storedBook(BOOK_A);
+    const key = `flash-position:${book.documentId}`;
+    const before = localStorage.getItem(key);
+    const originalSetItem = Storage.prototype.setItem;
+    const write = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, storageKey, value) {
+      if (storageKey === key) throw new DOMException("storage unavailable", errorName);
+      originalSetItem.call(this, storageKey, value);
+    });
+
+    await readChunks(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("読書位置を保存できません");
+    expect(localStorage.getItem(key)).toBe(before);
+    expect(flashText()).toBe("おか🍣きく");
+    fireEvent.click(screen.getByRole("button", { name: "保存を再試行" }));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(localStorage.getItem(key)).toBe(before);
+
+    await readChunks(1);
+    expect(flashText()).toBe("けこさしす");
+    write.mockRestore();
+    fireEvent.click(screen.getByRole("button", { name: "保存を再試行" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(savedPosition(book)).toMatchObject({ blockId: "b2", offsetCp: 10 });
+
+    await reload(unmount);
+    fireEvent.click(resumeButton(BOOK_A));
+    expect(flashText()).toBe("けこさしす");
+    expectStopped();
+  });
+
+  it("保存位置の読取拒否中は既存値を上書きせず、再読込で保存位置へ戻れる", async () => {
+    const { unmount } = render(<Page />);
+    await importFile(await bookA());
+    await screen.findByText(BOOK_A, { selector: "span" });
+    await readChunks(3);
+    const book = await storedBook(BOOK_A);
+    const key = `flash-position:${book.documentId}`;
+    const before = localStorage.getItem(key);
+    const originalGetItem = Storage.prototype.getItem;
+    const read = vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, storageKey) {
+      if (storageKey === key) throw new DOMException("storage unavailable", "SecurityError");
+      return originalGetItem.call(this, storageKey);
+    });
+    const write = vi.spyOn(Storage.prototype, "setItem");
+
+    await reload(unmount);
+    fireEvent.click(resumeButton(BOOK_A));
+    expect(screen.getByRole("alert")).toHaveTextContent("読書位置を読み込めません");
+    expect(flashText()).toBe("第一章🌸は");
+    await readChunks(1);
+    fireEvent.click(screen.getByRole("button", { name: "保存位置を再読込" }));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(write).not.toHaveBeenCalledWith(key, expect.anything());
+
+    read.mockRestore();
+    expect(localStorage.getItem(key)).toBe(before);
+    fireEvent.click(screen.getByRole("button", { name: "保存位置を再読込" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(flashText()).toBe("おか🍣きく");
+    expectStopped();
+    expect(savedPosition(book)).toMatchObject({ blockId: "b2", offsetCp: 5 });
+  });
+
+  it("本Aの保存失敗を本Bに持ち越さず、それぞれの保存位置を保つ", async () => {
+    render(<Page />);
+    await importFile(await bookA());
+    await screen.findByText(BOOK_A, { selector: "span" });
+    await readChunks(3);
+    await importFile(await bookB());
+    await screen.findByText(BOOK_B, { selector: "span" });
+    await readChunks(1);
+    const a = await storedBook(BOOK_A);
+    const b = await storedBook(BOOK_B);
+    const beforeA = savedPosition(a);
+    const beforeB = savedPosition(b);
+    const originalSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (key === `flash-position:${a.documentId}`) throw new DOMException("storage unavailable", "QuotaExceededError");
+      originalSetItem.call(this, key, value);
+    });
+
+    fireEvent.click(resumeButton(BOOK_A));
+    expect(screen.getByRole("alert")).toHaveTextContent("読書位置を保存できません");
+    await readChunks(1);
+    fireEvent.click(resumeButton(BOOK_B));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(flashText()).toBe("やゆよらり");
+    expectStopped();
+    expect(savedPosition(a)).toMatchObject(beforeA);
+    expect(savedPosition(b)).toMatchObject({ ...beforeB, updatedAt: expect.any(String) });
   });
 
   it("表示文字数を変えても読書位置を保持する", async () => {

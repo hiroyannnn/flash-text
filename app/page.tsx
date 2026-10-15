@@ -2,7 +2,7 @@
 
 import type React from "react";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
@@ -34,6 +34,8 @@ export default function FlashReader() {
   const [books, setBooks] = useState<BookDocument[]>([]);
   const [activeBook, setActiveBook] = useState<BookDocument | null>(null);
   const [importError, setImportError] = useState("");
+  const [positionReadError, setPositionReadError] = useState(false);
+  const [positionSaveError, setPositionSaveError] = useState(false);
   const [importing, setImporting] = useState(false);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const sourceUrlRef = useRef<string | null>(null);
@@ -99,7 +101,14 @@ export default function FlashReader() {
   const openBook = (book: BookDocument) => {
     closeSource();
     const text = readingText(book);
-    const offset = loadPosition(book);
+    let offset = 0;
+    try {
+      offset = loadPosition(book);
+      setPositionReadError(false);
+    } catch {
+      setPositionReadError(true);
+    }
+    setPositionSaveError(false);
     const nextChunks = bookChunks(book, chunkSize, offset);
     const index = chunkIndexAt(nextChunks, offset);
     setActiveBook(book);
@@ -176,11 +185,22 @@ export default function FlashReader() {
     return () => { mounted = false; };
   }, []);
 
-  useEffect(() => {
-    if (activeBook && chunks.length) {
-      savePosition(activeBook, chunks[currentChunkIndex]?.start ?? 0);
+  const persistPosition = useCallback((book: BookDocument, offset: number) => {
+    try {
+      savePosition(book, offset);
+      setPositionSaveError(false);
+    } catch {
+      setPositionSaveError(true);
     }
-  }, [activeBook, chunks, currentChunkIndex]);
+  }, []);
+
+  useEffect(() => {
+    if (!activeBook) {
+      setPositionSaveError(false);
+    } else if (chunks.length && !positionReadError) {
+      persistPosition(activeBook, chunks[currentChunkIndex]?.start ?? 0);
+    }
+  }, [activeBook, chunks, currentChunkIndex, positionReadError, persistPosition]);
 
   // Handle speed preset change
   const handleSpeedPresetChange = (
@@ -259,7 +279,7 @@ export default function FlashReader() {
           <CardContent className="space-y-3">
             <input type="file" accept=".epub,.zip,application/epub+zip" aria-label="本のファイルを選ぶ"
               onChange={handleImport} disabled={importing} />
-            {importing && <p role="status">取り込み中...</p>}
+            {importing && <output className="block">取り込み中...</output>}
             {importError && <p role="alert" className="text-destructive">{importError}</p>}
             {books.map((book) => (
               <div key={book.documentId} className="flex items-center justify-between gap-2">
@@ -390,6 +410,18 @@ export default function FlashReader() {
             </div>
           </CardHeader>
           <CardContent>
+            {activeBook && positionReadError && (
+              <div role="alert" className="mb-4 space-y-2 text-destructive">
+                <p>読書位置を読み込めません。先頭から一時的に開いています。保存済みの位置は上書きしません。</p>
+                <Button variant="outline" onClick={() => openBook(activeBook)}>保存位置を再読込</Button>
+              </div>
+            )}
+            {activeBook && !positionReadError && positionSaveError && (
+              <div role="alert" className="mb-4 space-y-2 text-destructive">
+                <p>読書位置を保存できません。別の本を開いたりページを閉じると、最後に保存できた位置に戻ります。</p>
+                <Button variant="outline" onClick={() => persistPosition(activeBook, chunks[currentChunkIndex]?.start ?? 0)}>保存を再試行</Button>
+              </div>
+            )}
             <div className="flex flex-col items-center">
               <div className="h-32 flex items-center justify-center w-full mb-4 border rounded-lg">
                 <p className="text-2xl font-medium text-center px-4">
