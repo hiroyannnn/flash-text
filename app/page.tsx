@@ -2,11 +2,16 @@
 
 import type React from "react";
 
-import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
-import { Textarea } from "@/components/ui/textarea";
-import { Play, Pause, RotateCcw, Settings } from "lucide-react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Sheet,
   SheetContent,
@@ -15,73 +20,60 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import { Slider } from "@/components/ui/slider";
+import { Textarea } from "@/components/ui/textarea";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Label } from "@/components/ui/label";
+  type Chunk,
+  chunkIndexAt,
+  displayDurationMs,
+  readingProgress,
+  splitIntoChunks,
+} from "@/lib/reading";
+import { Pause, Play, RotateCcw, Settings } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 export default function FlashReader() {
   const [inputText, setInputText] = useState("");
-  const [chunks, setChunks] = useState<string[]>([]);
+  const [chunks, setChunks] = useState<Chunk[]>([]);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [speed, setSpeed] = useState(300); // words per minute
-  const [chunkSize, setChunkSize] = useState(5); // characters per chunk
+  const [speed, setSpeed] = useState(300);
+  const [chunkSize, setChunkSize] = useState(5);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const [progress, setProgress] = useState(0);
   const [speedMode, setSpeedMode] = useState<"low" | "mid" | "high" | "custom">(
     "mid"
   );
 
-  // Split text into chunks by characters
-  const processText = () => {
-    if (!inputText.trim()) return;
-
-    const textChunks = [];
-    const text = inputText.replace(/\s+/g, " ").trim();
-
-    for (let i = 0; i < text.length; i += chunkSize) {
-      textChunks.push(text.substring(i, i + chunkSize));
-    }
-
+  const changeChunkSize = ([size]: number[]) => {
+    setChunkSize(size);
+    if (!chunks.length) return;
+    const offset = chunks[currentChunkIndex]?.start ?? 0;
+    const textChunks = splitIntoChunks(inputText, size, offset);
+    const index = chunkIndexAt(textChunks, offset);
     setChunks(textChunks);
-    setCurrentChunkIndex(0);
-    setProgress(0);
+    setCurrentChunkIndex(index);
+    setProgress(readingProgress(textChunks, index));
   };
 
-  // Calculate delay based on speed (characters per minute)
-  const getDelayInMs = () => {
-    // Convert characters per minute to milliseconds per chunk
-    return (60 / speed) * 1000 * (chunkSize / 5); // Assuming average 5 chars per word
-  };
-
-  // Start the flash reading
   const startReading = () => {
     if (chunks.length === 0) {
-      processText();
+      const initial = splitIntoChunks(inputText, chunkSize);
+      setChunks(initial);
+      setCurrentChunkIndex(0);
+      setProgress(0);
     }
-
     setIsPlaying(true);
   };
 
-  // Pause the flash reading
-  const pauseReading = () => {
-    setIsPlaying(false);
-  };
+  const pauseReading = () => setIsPlaying(false);
 
-  // Reset the flash reading
   const resetReading = () => {
     setIsPlaying(false);
     setCurrentChunkIndex(0);
     setProgress(0);
   };
 
-  // Handle text input change
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInputText(e.target.value);
     setChunks([]);
@@ -90,13 +82,11 @@ export default function FlashReader() {
     setIsPlaying(false);
   };
 
-  // Handle speed preset change
   const handleSpeedPresetChange = (
     value: "low" | "mid" | "high" | "custom"
   ) => {
     setSpeedMode(value);
 
-    // Set speed based on preset
     switch (value) {
       case "low":
         setSpeed(150);
@@ -107,22 +97,23 @@ export default function FlashReader() {
       case "high":
         setSpeed(600);
         break;
-      // For custom, keep the current speed
     }
   };
 
-  // Update chunk index and progress
-  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     if (isPlaying && chunks.length > 0) {
-      timerRef.current = setTimeout(() => {
-        if (currentChunkIndex < chunks.length - 1) {
-          setCurrentChunkIndex((prev) => prev + 1);
-          setProgress(((currentChunkIndex + 1) / (chunks.length - 1)) * 100);
-        } else {
-          setIsPlaying(false);
-        }
-      }, getDelayInMs());
+      timerRef.current = setTimeout(
+        () => {
+          if (currentChunkIndex < chunks.length - 1) {
+            setCurrentChunkIndex((prev) => prev + 1);
+            setProgress(readingProgress(chunks, currentChunkIndex + 1));
+          } else {
+            setIsPlaying(false);
+            setProgress(100);
+          }
+        },
+        displayDurationMs(chunks[currentChunkIndex].text, speed)
+      );
     }
 
     return () => {
@@ -130,15 +121,16 @@ export default function FlashReader() {
         clearTimeout(timerRef.current);
       }
     };
-  }, [isPlaying, currentChunkIndex, chunks.length, speed, chunkSize]);
+  }, [isPlaying, currentChunkIndex, chunks, speed]);
 
-  // Process text when chunk size changes
-  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
-    if (inputText.trim()) {
-      processText();
-    }
-  }, [chunkSize]);
+    const pauseWhenHidden = () => {
+      if (document.hidden) setIsPlaying(false);
+    };
+    document.addEventListener("visibilitychange", pauseWhenHidden);
+    return () =>
+      document.removeEventListener("visibilitychange", pauseWhenHidden);
+  }, []);
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-3xl">
@@ -188,7 +180,7 @@ export default function FlashReader() {
               <CardTitle>フラッシュ表示</CardTitle>
               <Sheet>
                 <SheetTrigger asChild>
-                  <Button variant="outline" size="icon">
+                  <Button variant="outline" size="icon" aria-label="設定">
                     <Settings className="h-4 w-4" />
                   </Button>
                 </SheetTrigger>
@@ -255,7 +247,7 @@ export default function FlashReader() {
                         min={1}
                         max={10}
                         step={1}
-                        onValueChange={(value) => setChunkSize(value[0])}
+                        onValueChange={changeChunkSize}
                       />
                     </div>
                   </div>
@@ -268,7 +260,7 @@ export default function FlashReader() {
               <div className="h-32 flex items-center justify-center w-full mb-4 border rounded-lg">
                 <p className="text-2xl font-medium text-center px-4">
                   {chunks.length > 0
-                    ? chunks[currentChunkIndex]
+                    ? chunks[currentChunkIndex].text
                     : "テキストを入力して開始ボタンを押してください"}
                 </p>
               </div>
