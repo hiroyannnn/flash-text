@@ -65,4 +65,28 @@ describe("reading position", () => {
       read.mockRestore();
     }
   });
+
+  it("starts from the beginning when the saved offset is past its block", () => {
+    window.localStorage.setItem(
+      "flash-position:test-book",
+      JSON.stringify({
+        revisionId: "v1",
+        blockId: "b1",
+        offsetCp: 4,
+      })
+    );
+    expect(loadPosition(book)).toBe(0);
+  });
+
+  it("keeps an offset at the end of its block", () => {
+    window.localStorage.setItem(
+      "flash-position:test-book",
+      JSON.stringify({
+        revisionId: "v1",
+        blockId: "b2",
+        offsetCp: 3,
+      })
+    );
+    expect(loadPosition(book)).toBe(7);
+  });
 });

@@ -22,13 +22,21 @@ import {
 } from "@/components/ui/sheet";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
-import { type BookDocument, importEpub, readingText } from "@/lib/book";
 import {
+  type BookDocument,
+  bookChunks,
+  importEpub,
+  readingText,
+} from "@/lib/book";
+import {
+  getSourceImage,
   listBooks,
   loadPosition,
   saveBook,
+  saveFlashbook,
   savePosition,
 } from "@/lib/book-store";
+import { importFlashbook } from "@/lib/flashbook";
 import {
   type Chunk,
   chunkIndexAt,
@@ -46,6 +54,9 @@ export default function FlashReader() {
   const [importError, setImportError] = useState("");
   const [positionError, setPositionError] = useState("");
   const [importing, setImporting] = useState(false);
+  const [sourceUrl, setSourceUrl] = useState<string | null>(null);
+  const sourceUrlRef = useRef<string | null>(null);
+  const sourceRequestRef = useRef(0);
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -61,7 +72,9 @@ export default function FlashReader() {
     setChunkSize(size);
     if (!chunks.length) return;
     const offset = chunks[currentChunkIndex]?.start ?? 0;
-    const textChunks = splitIntoChunks(inputText, size, offset);
+    const textChunks = activeBook
+      ? bookChunks(activeBook, size, offset)
+      : splitIntoChunks(inputText, size, offset);
     const index = chunkIndexAt(textChunks, offset);
     setChunks(textChunks);
     setCurrentChunkIndex(index);
@@ -70,10 +83,16 @@ export default function FlashReader() {
 
   const startReading = () => {
     if (chunks.length === 0) {
-      const initial = splitIntoChunks(inputText, chunkSize);
+      const initial = activeBook
+        ? bookChunks(activeBook, chunkSize)
+        : splitIntoChunks(inputText, chunkSize);
       setChunks(initial);
       setCurrentChunkIndex(0);
       setProgress(0);
+    }
+    if (chunks[currentChunkIndex]?.review) {
+      void openSource();
+      return;
     }
     setIsPlaying(true);
   };
@@ -81,12 +100,14 @@ export default function FlashReader() {
   const pauseReading = () => setIsPlaying(false);
 
   const resetReading = () => {
+    closeSource();
     setIsPlaying(false);
     setCurrentChunkIndex(0);
     setProgress(0);
   };
 
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    closeSource();
     setActiveBook(null);
     setInputText(e.target.value);
     setChunks([]);
@@ -104,8 +125,9 @@ export default function FlashReader() {
       return;
     }
     setPositionError("");
+    closeSource();
     const text = readingText(book);
-    const nextChunks = splitIntoChunks(text, chunkSize, offset);
+    const nextChunks = bookChunks(book, chunkSize, offset);
     const index = chunkIndexAt(nextChunks, offset);
     setActiveBook(book);
     setInputText(text);
@@ -115,16 +137,21 @@ export default function FlashReader() {
     setIsPlaying(false);
   };
 
-  const handleEpub = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     setImportError("");
     setImporting(true);
     try {
-      if (!file.name.toLowerCase().endsWith(".epub"))
-        throw new Error("EPUBファイルを選んでください");
-      const book = await importEpub(file);
-      await saveBook(book);
+      let book: BookDocument;
+      if (file.name.toLowerCase().endsWith(".flashbook.zip")) {
+        const imported = await importFlashbook(file);
+        book = imported.book;
+        await saveFlashbook(book, imported.images);
+      } else if (file.name.toLowerCase().endsWith(".epub")) {
+        book = await importEpub(file);
+        await saveBook(book);
+      } else throw new Error("EPUBまたは.flashbook.zipを選んでください");
       setBooks(await listBooks());
       openBook(book);
     } catch (error) {
@@ -136,6 +163,52 @@ export default function FlashReader() {
       event.target.value = "";
     }
   };
+
+  const currentBlock = activeBook?.blocks.find(
+    (block) => block.id === chunks[currentChunkIndex]?.blockId
+  );
+  const sourceUnitId =
+    currentBlock?.kind === "review"
+      ? currentBlock.sourceUnitIds[0]
+      : currentBlock?.sourceSpans[0]?.unitId;
+  const sourceBox =
+    currentBlock?.kind === "review"
+      ? undefined
+      : currentBlock?.sourceSpans[0]?.bbox;
+
+  const openSource = async () => {
+    if (!activeBook || !sourceUnitId) return;
+    setIsPlaying(false);
+    const request = ++sourceRequestRef.current;
+    try {
+      const blob = await getSourceImage(activeBook, sourceUnitId);
+      if (request !== sourceRequestRef.current) return;
+      if (!blob) throw new Error("元画像が保存されていません");
+      if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
+      sourceUrlRef.current = URL.createObjectURL(blob);
+      setSourceUrl(sourceUrlRef.current);
+    } catch (error) {
+      if (request !== sourceRequestRef.current) return;
+      setImportError(
+        error instanceof Error ? error.message : "元画像を開けませんでした"
+      );
+    }
+  };
+
+  const closeSource = () => {
+    sourceRequestRef.current++;
+    setSourceUrl(null);
+    if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
+    sourceUrlRef.current = null;
+  };
+
+  useEffect(
+    () => () => {
+      sourceRequestRef.current++;
+      if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
+    },
+    []
+  );
 
   useEffect(() => {
     if (!("indexedDB" in window)) return;
@@ -185,6 +258,10 @@ export default function FlashReader() {
 
   useEffect(() => {
     if (isPlaying && chunks.length > 0) {
+      if (chunks[currentChunkIndex]?.review) {
+        setIsPlaying(false);
+        return;
+      }
       timerRef.current = setTimeout(
         () => {
           if (currentChunkIndex < chunks.length - 1) {
@@ -226,15 +303,15 @@ export default function FlashReader() {
           <CardHeader>
             <CardTitle>本を取り込む</CardTitle>
             <CardDescription>
-              公式にダウンロードできる暗号化されていないEPUBを端末内に保存します
+              暗号化されていないEPUBや取得済み画面の読書用ZIPを端末内に保存します
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             <input
               type="file"
-              accept=".epub,application/epub+zip"
-              aria-label="EPUBを選ぶ"
-              onChange={handleEpub}
+              accept=".epub,.zip,application/epub+zip"
+              aria-label="本のファイルを選ぶ"
+              onChange={handleImport}
               disabled={importing}
             />
             {importing && <output>取り込み中...</output>}
@@ -285,6 +362,7 @@ export default function FlashReader() {
               <Button
                 variant="outline"
                 onClick={() => {
+                  closeSource();
                   setActiveBook(null);
                   setInputText(`「あれ、意外と読める」と気づきました。フラッシュテキストで文章を読んでみたら、普段より早く読めるんです。目線を左右に動かす必要がないから、自然と読むスピードが上がるみたい。
 
@@ -389,7 +467,9 @@ export default function FlashReader() {
               <div className="h-32 flex items-center justify-center w-full mb-4 border rounded-lg">
                 <p className="text-2xl font-medium text-center px-4">
                   {chunks.length > 0
-                    ? chunks[currentChunkIndex].text
+                    ? chunks[currentChunkIndex].review
+                      ? "原文の確認が必要です"
+                      : chunks[currentChunkIndex].text
                     : "テキストを入力して開始ボタンを押してください"}
                 </p>
               </div>
@@ -409,6 +489,30 @@ export default function FlashReader() {
               </div>
 
               <div className="flex gap-2">
+                {activeBook?.sourceKind === "kindle-capture" &&
+                  currentBlock && (
+                    <Button variant="outline" onClick={() => void openSource()}>
+                      元画像
+                    </Button>
+                  )}
+                {chunks[currentChunkIndex]?.review && (
+                  <Button
+                    onClick={() => {
+                      closeSource();
+                      if (currentChunkIndex < chunks.length - 1) {
+                        setCurrentChunkIndex((index) => index + 1);
+                        setProgress(
+                          readingProgress(chunks, currentChunkIndex + 1)
+                        );
+                        setIsPlaying(true);
+                      } else {
+                        setProgress(100);
+                      }
+                    }}
+                  >
+                    確認して続ける
+                  </Button>
+                )}
                 {!isPlaying ? (
                   <Button onClick={startReading} disabled={!inputText.trim()}>
                     <Play className="mr-2 h-4 w-4" /> 開始
@@ -426,6 +530,31 @@ export default function FlashReader() {
                   <RotateCcw className="mr-2 h-4 w-4" /> リセット
                 </Button>
               </div>
+              {sourceUrl && (
+                <div className="mt-6 w-full">
+                  <Button variant="outline" onClick={closeSource}>
+                    元画像を閉じる
+                  </Button>
+                  <div className="relative mt-2">
+                    <img
+                      src={sourceUrl}
+                      alt="取り込み時の元画面"
+                      className="w-full h-auto"
+                    />
+                    {sourceBox && (
+                      <div
+                        className="absolute border-2 border-red-500 pointer-events-none"
+                        style={{
+                          left: `${sourceBox[0] * 100}%`,
+                          top: `${sourceBox[1] * 100}%`,
+                          width: `${sourceBox[2] * 100}%`,
+                          height: `${sourceBox[3] * 100}%`,
+                        }}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
