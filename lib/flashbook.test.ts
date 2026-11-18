@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import { bookChunks } from "./book";
 import { importFlashbook } from "./flashbook";
 
-async function fixture(duplicateBlock = false): Promise<File> {
+async function fixture({
+  duplicateBlock = false,
+  schemaVersion = 1,
+}: { duplicateBlock?: boolean; schemaVersion?: number } = {}): Promise<File> {
   const zip = new JSZip();
   const image = new Uint8Array([137, 80, 78, 71, 1, 2, 3]);
   const digest = await crypto.subtle.digest("SHA-256", image);
@@ -14,7 +17,7 @@ async function fixture(duplicateBlock = false): Promise<File> {
   zip.file(
     "book.json",
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion,
       documentId: sha,
       revisionId: sha,
       title: "試験",
@@ -60,10 +63,16 @@ async function fixture(duplicateBlock = false): Promise<File> {
 }
 
 describe("flashbook import", () => {
+  it("rejects an unsupported manifest version", async () => {
+    await expect(
+      importFlashbook(await fixture({ schemaVersion: 2 }))
+    ).rejects.toThrow(/本文形式/);
+  });
+
   it("rejects duplicate block IDs that would make bookmarks ambiguous", async () => {
-    await expect(importFlashbook(await fixture(true))).rejects.toThrow(
-      /参照位置/
-    );
+    await expect(
+      importFlashbook(await fixture({ duplicateBlock: true }))
+    ).rejects.toThrow(/参照位置/);
   });
   it("checks image integrity and stops at review blocks", async () => {
     const { book, images } = await importFlashbook(await fixture());
