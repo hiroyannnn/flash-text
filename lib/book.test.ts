@@ -45,7 +45,10 @@ describe("EPUB import", () => {
     ]);
     expect(readingText(book)).toBe("見出し 先の章です。 後の章です。");
     expect(readingText(book)).not.toContain("evil");
-    expect(book.blocks[0].sourceSpans[0].unitId).toBe(book.units[0].id);
+    const first = book.blocks[0];
+    expect(first.kind === "review" ? null : first.sourceSpans[0].unitId).toBe(
+      book.units[0].id
+    );
   });
 
   it("rejects encrypted EPUB", async () => {

@@ -1,4 +1,10 @@
-export type Chunk = { text: string; start: number; end: number };
+export type Chunk = {
+  text: string;
+  start: number;
+  end: number;
+  blockId?: string;
+  review?: boolean;
+};
 
 const segmenter = new Intl.Segmenter("ja", { granularity: "grapheme" });
 
