@@ -1,9 +1,7 @@
 import "@testing-library/jest-dom";
 import { beforeEach } from "vitest";
 
-// jsdom has no IndexedDB, and this copy must not add fake-indexeddb, so tests use
-// the small subset that lib/book-store.ts calls. Mocking book-store instead would
-// skip the storage boundary the reader depends on after a reload.
+// jsdom has no IndexedDB; exercise the shelf across reader remounts.
 // Events run on microtasks, not setTimeout, so reading tests can fake timers.
 type FakeStore = { keyPath?: string; records: Map<string, unknown> };
 type FakeDatabaseEntry = { version: number; stores: Map<string, FakeStore> };
@@ -28,14 +26,18 @@ class FakeRequest<T> {
 }
 
 class FakeObjectStore {
-  constructor(private transaction: FakeTransaction, private store: FakeStore) {}
+  constructor(
+    private transaction: FakeTransaction,
+    private store: FakeStore
+  ) {}
 
   put(value: unknown, key?: IDBValidKey): FakeRequest<IDBValidKey> {
     if (this.transaction.mode === "readonly") throw domError("ReadOnlyError");
     const keyPath = this.store.keyPath;
-    const resolvedKey = keyPath && typeof value === "object" && value !== null
-      ? Reflect.get(value, keyPath)
-      : key;
+    const resolvedKey =
+      keyPath && typeof value === "object" && value !== null
+        ? Reflect.get(value, keyPath)
+        : key;
     if (resolvedKey === undefined) throw domError("DataError");
     const stored = cloneValue(value);
     return this.transaction.enqueue(() => {
@@ -52,9 +54,11 @@ class FakeObjectStore {
   }
 
   getAll(): FakeRequest<unknown[]> {
-    return this.transaction.enqueue(() => Array.from(this.store.records.entries())
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([, value]) => cloneValue(value)));
+    return this.transaction.enqueue(() =>
+      Array.from(this.store.records.entries())
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([, value]) => cloneValue(value))
+    );
   }
 }
 
@@ -65,7 +69,11 @@ class FakeTransaction {
   onabort: (() => void) | null = null;
   private operations: (() => void)[] = [];
 
-  constructor(private stores: Map<string, FakeStore>, private names: string[], readonly mode: IDBTransactionMode) {
+  constructor(
+    private stores: Map<string, FakeStore>,
+    private names: string[],
+    readonly mode: IDBTransactionMode
+  ) {
     void Promise.resolve().then(() => this.run());
   }
 
@@ -85,7 +93,9 @@ class FakeTransaction {
   }
 
   private run(): void {
-    const snapshot = new Map(Array.from(this.stores, ([name, store]) => [name, new Map(store.records)]));
+    const snapshot = new Map(
+      Array.from(this.stores, ([name, store]) => [name, new Map(store.records)])
+    );
     try {
       while (this.operations.length) this.operations.shift()?.();
     } catch (error) {
@@ -93,7 +103,8 @@ class FakeTransaction {
         const store = this.stores.get(name);
         if (store) store.records = records;
       }
-      this.error = error instanceof DOMException ? error : domError("AbortError");
+      this.error =
+        error instanceof DOMException ? error : domError("AbortError");
       this.onerror?.();
       this.onabort?.();
       return;
@@ -115,9 +126,16 @@ class FakeDatabase {
     this.stores.set(name, { keyPath: options?.keyPath, records: new Map() });
   }
 
-  transaction(names: string | string[], mode: IDBTransactionMode = "readonly"): FakeTransaction {
+  transaction(
+    names: string | string[],
+    mode: IDBTransactionMode = "readonly"
+  ): FakeTransaction {
     if (this.closed) throw domError("InvalidStateError");
-    return new FakeTransaction(this.stores, Array.isArray(names) ? names : [names], mode);
+    return new FakeTransaction(
+      this.stores,
+      Array.isArray(names) ? names : [names],
+      mode
+    );
   }
 
   close(): void {
@@ -135,7 +153,10 @@ const fakeIndexedDB = {
         request.onerror?.();
         return;
       }
-      const entry = existing ?? { version: 0, stores: new Map<string, FakeStore>() };
+      const entry = existing ?? {
+        version: 0,
+        stores: new Map<string, FakeStore>(),
+      };
       databases.set(name, entry);
       request.result = new FakeDatabase(entry.stores);
       if (version > entry.version) {
@@ -149,7 +170,10 @@ const fakeIndexedDB = {
 };
 
 if (!("indexedDB" in globalThis)) {
-  Object.defineProperty(globalThis, "indexedDB", { value: fakeIndexedDB, configurable: true });
+  Object.defineProperty(globalThis, "indexedDB", {
+    value: fakeIndexedDB,
+    configurable: true,
+  });
 }
 
 beforeEach(() => databases.clear());
