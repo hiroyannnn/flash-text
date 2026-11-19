@@ -45,14 +45,17 @@ import {
   splitIntoChunks,
 } from "@/lib/reading";
 import { Pause, Play, RotateCcw, Settings } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export default function FlashReader() {
   const [inputText, setInputText] = useState("");
   const [books, setBooks] = useState<BookDocument[]>([]);
   const [activeBook, setActiveBook] = useState<BookDocument | null>(null);
   const [importError, setImportError] = useState("");
-  const [positionError, setPositionError] = useState("");
+  const [positionError, setPositionError] = useState<"read" | "write" | null>(
+    null
+  );
+  const positionReadFailed = positionError === "read";
   const [importing, setImporting] = useState(false);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const sourceUrlRef = useRef<string | null>(null);
@@ -109,6 +112,7 @@ export default function FlashReader() {
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     closeSource();
     setActiveBook(null);
+    setPositionError(null);
     setInputText(e.target.value);
     setChunks([]);
     setCurrentChunkIndex(0);
@@ -117,14 +121,20 @@ export default function FlashReader() {
   };
 
   const openBook = (book: BookDocument) => {
-    let offset: number;
+    let offset = 0;
     try {
       offset = loadPosition(book);
+      setPositionError(null);
     } catch {
-      setPositionError("保存した読書位置を読み込めませんでした。");
-      return;
+      if (
+        positionReadFailed &&
+        activeBook?.documentId === book.documentId &&
+        activeBook.revisionId === book.revisionId
+      ) {
+        return;
+      }
+      setPositionError("read");
     }
-    setPositionError("");
     closeSource();
     const text = readingText(book);
     const nextChunks = bookChunks(book, chunkSize, offset);
@@ -225,18 +235,26 @@ export default function FlashReader() {
     };
   }, []);
 
-  useEffect(() => {
-    if (activeBook && chunks.length) {
-      try {
-        savePosition(activeBook, chunks[currentChunkIndex]?.start ?? 0);
-        setPositionError("");
-      } catch {
-        setPositionError(
-          "読書位置を保存できませんでした。以前のしおりから再開します。"
-        );
-      }
+  const persistPosition = useCallback((book: BookDocument, offset: number) => {
+    try {
+      savePosition(book, offset);
+      setPositionError(null);
+    } catch {
+      setPositionError("write");
     }
-  }, [activeBook, chunks, currentChunkIndex]);
+  }, []);
+
+  useEffect(() => {
+    if (activeBook && chunks.length && !positionReadFailed) {
+      persistPosition(activeBook, chunks[currentChunkIndex].start);
+    }
+  }, [
+    activeBook,
+    chunks,
+    currentChunkIndex,
+    persistPosition,
+    positionReadFailed,
+  ]);
 
   const handleSpeedPresetChange = (
     value: "low" | "mid" | "high" | "custom"
@@ -320,11 +338,6 @@ export default function FlashReader() {
                 {importError}
               </p>
             )}
-            {positionError && (
-              <p role="alert" className="text-destructive">
-                {positionError}
-              </p>
-            )}
             {books.map((book) => (
               <div
                 key={book.documentId}
@@ -364,6 +377,7 @@ export default function FlashReader() {
                 onClick={() => {
                   closeSource();
                   setActiveBook(null);
+                  setPositionError(null);
                   setInputText(`「あれ、意外と読める」と気づきました。フラッシュテキストで文章を読んでみたら、普段より早く読めるんです。目線を左右に動かす必要がないから、自然と読むスピードが上がるみたい。
 
 長文を読む時って、目線を右から左に動かすのが意外と時間を取るんですよね。でもフラッシュテキストなら、文字が目の前に表示されるから、その分だけ早く読める。最初は「こんな速さで読めるの？」って思ったけど、使ってみたら意外と自然に読めました。
@@ -463,6 +477,31 @@ export default function FlashReader() {
             </div>
           </CardHeader>
           <CardContent>
+            {activeBook && positionReadFailed && (
+              <div className="mb-4 space-y-2">
+                <p role="alert" className="text-destructive">
+                  読書位置を読み込めません。先頭から一時的に開いています。保存済みの位置は上書きしません。
+                </p>
+                <Button variant="outline" onClick={() => openBook(activeBook)}>
+                  保存位置を再読込
+                </Button>
+              </div>
+            )}
+            {activeBook && positionError === "write" && (
+              <div className="mb-4 space-y-2">
+                <p role="alert" className="text-destructive">
+                  読書位置を保存できません。別の本を開いたりページを閉じると、最後に保存できた位置に戻ります。
+                </p>
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    persistPosition(activeBook, chunks[currentChunkIndex].start)
+                  }
+                >
+                  保存を再試行
+                </Button>
+              </div>
+            )}
             <div className="flex flex-col items-center">
               <div className="h-32 flex items-center justify-center w-full mb-4 border rounded-lg">
                 <p className="text-2xl font-medium text-center px-4">
