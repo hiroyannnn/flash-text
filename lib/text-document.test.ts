@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bookChunks } from "./book";
 import {
+  bookLength,
   listSavedBooks,
   loadReadingState,
   renameTextBook,
@@ -9,9 +10,9 @@ import {
   saveTextBook,
 } from "./book-store";
 import {
+  MAX_TEXT_BYTES,
   createTextDocument,
   importTextFile,
-  MAX_TEXT_BYTES,
   textTitle,
 } from "./text-document";
 
@@ -87,9 +88,10 @@ describe("local plain-text documents", () => {
   it("stores independent inputs and renames without changing their identity, body, position or completion", async () => {
     const a = await saveTextBook(createTextDocument("同じ合成本文😀"));
     const b = await saveTextBook(createTextDocument("同じ合成本文😀"));
-    savePosition(a, 8, true);
+    savePosition(a, bookLength(a), true);
     savePosition(b, 2);
     const state = loadReadingState(a);
+    expect(state).toMatchObject({ offset: bookLength(a), completed: true });
     const renamed = await renameTextBook(a.documentId, "新しい名前");
     expect(renamed).toEqual({ ...a, title: "新しい名前" });
     expect(loadReadingState(renamed)).toEqual(state);

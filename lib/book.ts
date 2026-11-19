@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { type Chunk, splitIntoChunks } from "./reading";
 
 export type BookDocument = {
   schemaVersion: 1;
@@ -9,22 +10,42 @@ export type BookDocument = {
   sourceKind: "epub" | "kindle-capture" | "text";
   plainText?: string;
   coverage: "full-user-confirmed" | "unknown" | "partial";
-  units: { id: string; ordinal: number; epubHref?: string; imagePath?: string; imageSha256?: string; widthPx?: number; heightPx?: number }[];
-  blocks: ({
+  units: {
     id: string;
-    kind: "heading" | "paragraph";
-    canonicalText: string;
-    sourceSpans: { unitId: string; startCp: number; endCp: number; bbox?: [number, number, number, number] }[];
-    quality: "unreviewed" | "accepted" | "needs-review";
-  } | {
-    id: string;
-    kind: "review";
-    reason: "figure" | "table" | "code" | "formula" | "ocr" | "reading-order";
-    sourceUnitIds: string[];
-  })[];
+    ordinal: number;
+    epubHref?: string;
+    imagePath?: string;
+    imageSha256?: string;
+    widthPx?: number;
+    heightPx?: number;
+  }[];
+  blocks: (
+    | {
+        id: string;
+        kind: "heading" | "paragraph";
+        canonicalText: string;
+        sourceSpans: {
+          unitId: string;
+          startCp: number;
+          endCp: number;
+          bbox?: [number, number, number, number];
+        }[];
+        quality: "unreviewed" | "accepted" | "needs-review";
+      }
+    | {
+        id: string;
+        kind: "review";
+        reason:
+          | "figure"
+          | "table"
+          | "code"
+          | "formula"
+          | "ocr"
+          | "reading-order";
+        sourceUnitIds: string[];
+      }
+  )[];
 };
-
-import { splitIntoChunks, type Chunk } from "./reading";
 
 export const REVIEW_TEXT = "［原文を確認］";
 
@@ -32,19 +53,33 @@ export function blockText(block: BookDocument["blocks"][number]): string {
   return block.kind === "review" ? REVIEW_TEXT : block.canonicalText;
 }
 
-export function bookChunks(book: BookDocument, size: number, anchor = 0): Chunk[] {
+export function bookChunks(
+  book: BookDocument,
+  size: number,
+  anchor = 0
+): Chunk[] {
   const result: Chunk[] = [];
   let offset = 0;
   for (const block of book.blocks) {
     const text = blockText(block);
     if (block.kind === "review") {
-      result.push({ text, start: offset, end: offset + Array.from(text).length,
-        blockId: block.id, review: true });
+      result.push({
+        text,
+        start: offset,
+        end: offset + Array.from(text).length,
+        blockId: block.id,
+        review: true,
+      });
     } else {
       const localAnchor = anchor >= offset ? anchor - offset : 0;
-      result.push(...splitIntoChunks(text, size, localAnchor).map((chunk) => ({
-        ...chunk, start: chunk.start + offset, end: chunk.end + offset, blockId: block.id,
-      })));
+      for (const chunk of splitIntoChunks(text, size, localAnchor)) {
+        result.push({
+          ...chunk,
+          start: chunk.start + offset,
+          end: chunk.end + offset,
+          blockId: block.id,
+        });
+      }
     }
     offset += Array.from(text).length + 1;
   }
@@ -53,31 +88,62 @@ export function bookChunks(book: BookDocument, size: number, anchor = 0): Chunk[
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_ENTRIES = 2000;
-const MAX_CHAPTER_CHARS = 500_000;
+const MAX_CHAPTER_BYTES = 500_000;
 const MAX_BOOK_CHARS = 5_000_000;
 
-async function readText(entry: JSZip.JSZipObject, limit: number): Promise<string> {
-  // JSZip exposes the ZIP header's uncompressed size here. Check before inflating.
-  const data = entry as JSZip.JSZipObject & { _data?: { uncompressedSize?: number } };
-  if ((data._data?.uncompressedSize ?? 0) > limit) throw new Error("EPUB内のファイルが大きすぎます");
-  const text = await entry.async("text");
-  if (text.length > limit) throw new Error("EPUB内のファイルが大きすぎます");
-  return text;
+function readText(entry: JSZip.JSZipObject, limit: number): Promise<string> {
+  const data = entry as JSZip.JSZipObject & {
+    _data?: { uncompressedSize?: number };
+  };
+  const tooLarge = () => new Error("EPUB内のファイルが大きすぎます");
+  if ((data._data?.uncompressedSize ?? 0) > limit)
+    return Promise.reject(tooLarge());
+  // The declared size is untrusted; enforce the limit on bytes actually emitted.
+  const archiveEntry = entry as JSZip.JSZipObject & {
+    internalStream(type: "uint8array"): JSZip.JSZipStreamHelper<Uint8Array>;
+  };
+  return new Promise((resolve, reject) => {
+    const stream = archiveEntry.internalStream("uint8array");
+    const decoder = new TextDecoder();
+    let bytes = 0;
+    let text = "";
+    stream
+      .on("data", (chunk) => {
+        bytes += chunk.byteLength;
+        if (bytes > limit) {
+          stream.pause();
+          reject(tooLarge());
+          return;
+        }
+        text += decoder.decode(chunk, { stream: true });
+      })
+      .on("error", reject)
+      .on("end", () => resolve(text + decoder.decode()))
+      .resume();
+  });
 }
 
 function parseXml(source: string): Document {
   const document = new DOMParser().parseFromString(source, "application/xml");
-  if (document.querySelector("parsererror")) throw new Error("EPUBのXMLを解析できません");
+  if (document.querySelector("parsererror"))
+    throw new Error("EPUBのXMLを解析できません");
   return document;
 }
 
 function childElements(element: Element, localName: string): Element[] {
-  return Array.from(element.children).filter((child) => child.localName === localName);
+  return Array.from(element.children).filter(
+    (child) => child.localName === localName
+  );
 }
 
 function safePath(base: string, href: string): string {
   const path = decodeURIComponent(href.split("#")[0]);
-  if (!path || path.startsWith("/") || path.includes("\\") || /^[a-z]+:/i.test(path)) {
+  if (
+    !path ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    /^[a-z]+:/i.test(path)
+  ) {
     throw new Error("EPUB内に不正な参照があります");
   }
   const segments: string[] = [];
@@ -90,35 +156,54 @@ function safePath(base: string, href: string): string {
   return segments.join("/");
 }
 
-function paragraphs(source: string): { kind: "heading" | "paragraph"; text: string }[] {
+function paragraphs(
+  source: string
+): { kind: "heading" | "paragraph"; text: string }[] {
   const doc = new DOMParser().parseFromString(source, "application/xhtml+xml");
-  if (doc.querySelector("parsererror")) throw new Error("本文のXHTMLを解析できません");
+  if (doc.querySelector("parsererror"))
+    throw new Error("本文のXHTMLを解析できません");
   const body = doc.getElementsByTagName("body")[0];
   if (!body) return [];
-  // Only plain text leaves this parser. No EPUB markup is rendered in the app.
-  const selected = Array.from(body.querySelectorAll("h1,h2,h3,h4,h5,h6,p,li,blockquote"))
-    .filter((element) => !element.querySelector("h1,h2,h3,h4,h5,h6,p,li,blockquote"))
+  const selected = Array.from(
+    body.querySelectorAll("h1,h2,h3,h4,h5,h6,p,li,blockquote")
+  )
+    .filter(
+      (element) => !element.querySelector("h1,h2,h3,h4,h5,h6,p,li,blockquote")
+    )
     .map((element) => ({
-      kind: /^h[1-6]$/.test(element.localName) ? "heading" as const : "paragraph" as const,
-      text: (element.textContent ?? "").replace(/\s+/g, " ").trim().normalize("NFC"),
+      kind: /^h[1-6]$/.test(element.localName)
+        ? ("heading" as const)
+        : ("paragraph" as const),
+      text: (element.textContent ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .normalize("NFC"),
     }))
     .filter((item) => item.text);
   if (selected.length) return selected;
-  const text = (body.textContent ?? "").replace(/\s+/g, " ").trim().normalize("NFC");
+  const text = (body.textContent ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .normalize("NFC");
   return text ? [{ kind: "paragraph", text }] : [];
 }
 
 export async function importEpub(file: File): Promise<BookDocument> {
-  if (file.size > MAX_FILE_BYTES) throw new Error("20MB以下のEPUBを選んでください");
+  if (file.size > MAX_FILE_BYTES)
+    throw new Error("20MB以下のEPUBを選んでください");
   const bytes = await file.arrayBuffer();
   const zip = await JSZip.loadAsync(bytes);
   const names = Object.keys(zip.files);
-  if (names.length > MAX_ENTRIES) throw new Error("EPUB内のファイル数が多すぎます");
+  if (names.length > MAX_ENTRIES)
+    throw new Error("EPUB内のファイル数が多すぎます");
   const declaredSize = Object.values(zip.files).reduce((sum, entry) => {
-    const data = entry as JSZip.JSZipObject & { _data?: { uncompressedSize?: number } };
+    const data = entry as JSZip.JSZipObject & {
+      _data?: { uncompressedSize?: number };
+    };
     return sum + (data._data?.uncompressedSize ?? 0);
   }, 0);
-  if (declaredSize > 25 * 1024 * 1024) throw new Error("EPUBの展開サイズが大きすぎます");
+  if (declaredSize > 25 * 1024 * 1024)
+    throw new Error("EPUBの展開サイズが大きすぎます");
   if (zip.file("META-INF/encryption.xml")) {
     throw new Error("暗号化されたEPUBには対応していません");
   }
@@ -131,41 +216,76 @@ export async function importEpub(file: File): Promise<BookDocument> {
   const opf = zip.file(safePath("", opfPath));
   if (!opf) throw new Error("EPUBの書籍情報を開けません");
   const packageXml = parseXml(await readText(opf, 1_000_000));
-  const title = Array.from(packageXml.getElementsByTagName("*"))
-    .find((element) => element.localName === "title")?.textContent?.trim() || file.name;
-  const manifest = Array.from(packageXml.getElementsByTagName("*"))
-    .find((element) => element.localName === "manifest");
-  const spine = Array.from(packageXml.getElementsByTagName("*"))
-    .find((element) => element.localName === "spine");
+  const title =
+    Array.from(packageXml.getElementsByTagName("*"))
+      .find((element) => element.localName === "title")
+      ?.textContent?.trim() || file.name;
+  const manifest = Array.from(packageXml.getElementsByTagName("*")).find(
+    (element) => element.localName === "manifest"
+  );
+  const spine = Array.from(packageXml.getElementsByTagName("*")).find(
+    (element) => element.localName === "spine"
+  );
   if (!manifest || !spine) throw new Error("EPUBの本文順序がありません");
-  const items = new Map(childElements(manifest, "item")
-    .map((item) => [item.getAttribute("id"), item]));
-  const base = opfPath.includes("/") ? opfPath.slice(0, opfPath.lastIndexOf("/") + 1) : "";
+  const items = new Map(
+    childElements(manifest, "item").map((item) => [
+      item.getAttribute("id"),
+      item,
+    ])
+  );
+  const base = opfPath.includes("/")
+    ? opfPath.slice(0, opfPath.lastIndexOf("/") + 1)
+    : "";
   const hash = await crypto.subtle.digest("SHA-256", bytes);
-  const documentId = Array.from(new Uint8Array(hash)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const documentId = Array.from(new Uint8Array(hash))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
   const book: BookDocument = {
-    schemaVersion: 1, documentId, revisionId: documentId, title,
-    language: "ja", sourceKind: "epub", coverage: "unknown", units: [], blocks: [],
+    schemaVersion: 1,
+    documentId,
+    revisionId: documentId,
+    title,
+    language: "ja",
+    sourceKind: "epub",
+    coverage: "unknown",
+    units: [],
+    blocks: [],
   };
   let total = 0;
-  for (const reference of childElements(spine, "itemref")) {
+  const references = childElements(spine, "itemref");
+  if (references.length > MAX_ENTRIES)
+    throw new Error("EPUB内の章が多すぎます");
+  for (const reference of references) {
     if (reference.getAttribute("linear") === "no") continue;
     const item = items.get(reference.getAttribute("idref"));
-    if (!item || !["application/xhtml+xml", "text/html"].includes(item.getAttribute("media-type") ?? "")) {
+    if (
+      !item ||
+      !["application/xhtml+xml", "text/html"].includes(
+        item.getAttribute("media-type") ?? ""
+      )
+    ) {
       throw new Error("未対応の本文形式があります");
     }
     const href = safePath(base, item.getAttribute("href") ?? "");
     const entry = zip.file(href);
     if (!entry) throw new Error(`本文ファイルが見つかりません: ${href}`);
     const unitId = `u${book.units.length + 1}`;
-    book.units.push({ id: unitId, ordinal: book.units.length + 1, epubHref: href });
-    const chapter = await readText(entry, MAX_CHAPTER_CHARS);
+    book.units.push({
+      id: unitId,
+      ordinal: book.units.length + 1,
+      epubHref: href,
+    });
+    const chapter = await readText(entry, MAX_CHAPTER_BYTES);
     for (const part of paragraphs(chapter)) {
       total += Array.from(part.text).length;
       if (total > MAX_BOOK_CHARS) throw new Error("本文が大きすぎます");
       book.blocks.push({
-        id: `b${book.blocks.length + 1}`, kind: part.kind, canonicalText: part.text,
-        sourceSpans: [{ unitId, startCp: 0, endCp: Array.from(part.text).length }],
+        id: `b${book.blocks.length + 1}`,
+        kind: part.kind,
+        canonicalText: part.text,
+        sourceSpans: [
+          { unitId, startCp: 0, endCp: Array.from(part.text).length },
+        ],
         quality: "unreviewed",
       });
     }
