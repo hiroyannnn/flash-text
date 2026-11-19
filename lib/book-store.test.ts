@@ -3,31 +3,46 @@ import type { BookDocument } from "./book";
 import { loadPosition, savePosition } from "./book-store";
 
 const book: BookDocument = {
-  schemaVersion: 1, documentId: "test-book", revisionId: "v1", title: "試験",
-  language: "ja", sourceKind: "epub", coverage: "unknown", units: [],
+  schemaVersion: 1,
+  documentId: "test-book",
+  revisionId: "v1",
+  title: "試験",
+  language: "ja",
+  sourceKind: "epub",
+  coverage: "unknown",
+  units: [],
   blocks: [
-    { id: "b1", kind: "paragraph", canonicalText: "あいう", sourceSpans: [], quality: "unreviewed" },
-    { id: "b2", kind: "paragraph", canonicalText: "えおか", sourceSpans: [], quality: "unreviewed" },
+    {
+      id: "b1",
+      kind: "paragraph",
+      canonicalText: "あいう",
+      sourceSpans: [],
+      quality: "unreviewed",
+    },
+    {
+      id: "b2",
+      kind: "paragraph",
+      canonicalText: "えおか",
+      sourceSpans: [],
+      quality: "unreviewed",
+    },
   ],
 };
 
-afterEach(() => {
-  vi.restoreAllMocks();
-  localStorage.clear();
-});
+afterEach(() => window.localStorage.clear());
 
 describe("reading position", () => {
-  it("surfaces storage read failures instead of treating them as position zero", () => {
-    const error = new DOMException("storage unavailable", "SecurityError");
-    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw error; });
-    expect(() => loadPosition(book)).toThrow("storage unavailable");
-  });
-
   it("restores the same code point in the second block", () => {
-    savePosition(book, 5); // 3 code points, a separator, then 1 code point.
+    savePosition(book, 5);
     expect(loadPosition(book)).toBe(5);
-    expect(JSON.parse(localStorage.getItem("flash-position:test-book") ?? "null")).toMatchObject({
-      revisionId: "v1", blockId: "b2", offsetCp: 1,
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("flash-position:test-book") ?? "null"
+      )
+    ).toMatchObject({
+      revisionId: "v1",
+      blockId: "b2",
+      offsetCp: 1,
     });
   });
 
@@ -36,17 +51,42 @@ describe("reading position", () => {
     expect(loadPosition({ ...book, revisionId: "v2" })).toBe(0);
   });
 
+  it("does not treat a failed storage read as an empty bookmark", () => {
+    savePosition(book, 5);
+    const read = vi
+      .spyOn(Storage.prototype, "getItem")
+      .mockImplementationOnce(() => {
+        throw new DOMException("Unavailable", "SecurityError");
+      });
+    try {
+      expect(() => loadPosition(book)).toThrow(/Unavailable/);
+      expect(loadPosition(book)).toBe(5);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   it("starts from the beginning when the saved offset is past its block", () => {
-    localStorage.setItem("flash-position:test-book", JSON.stringify({
-      revisionId: "v1", blockId: "b1", offsetCp: 4,
-    }));
+    window.localStorage.setItem(
+      "flash-position:test-book",
+      JSON.stringify({
+        revisionId: "v1",
+        blockId: "b1",
+        offsetCp: 4,
+      })
+    );
     expect(loadPosition(book)).toBe(0);
   });
 
   it("keeps an offset at the end of its block", () => {
-    localStorage.setItem("flash-position:test-book", JSON.stringify({
-      revisionId: "v1", blockId: "b2", offsetCp: 3,
-    }));
+    window.localStorage.setItem(
+      "flash-position:test-book",
+      JSON.stringify({
+        revisionId: "v1",
+        blockId: "b2",
+        offsetCp: 3,
+      })
+    );
     expect(loadPosition(book)).toBe(7);
   });
 });

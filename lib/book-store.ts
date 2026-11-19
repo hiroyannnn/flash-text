@@ -1,4 +1,4 @@
-import { blockText, type BookDocument } from "./book";
+import { type BookDocument, blockText } from "./book";
 
 const DB_NAME = "flash-text-books";
 const STORE_NAME = "books";
@@ -20,15 +20,25 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-async function request<T>(mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+async function request<T>(
+  mode: IDBTransactionMode,
+  operation: (store: IDBObjectStore) => IDBRequest<T>
+): Promise<T> {
   const db = await openDb();
   try {
     return await new Promise<T>((resolve, reject) => {
       const transaction = db.transaction(STORE_NAME, mode);
       const action = operation(transaction.objectStore(STORE_NAME));
       let result: T;
-      action.onsuccess = () => { result = action.result; };
+      action.onsuccess = () => {
+        result = action.result;
+      };
       action.onerror = () => reject(action.error);
+      transaction.onabort = () =>
+        reject(
+          transaction.error ??
+            new DOMException("保存を中止しました", "AbortError")
+        );
       transaction.onerror = () => reject(transaction.error);
       transaction.oncomplete = () => resolve(result);
     });
@@ -41,30 +51,47 @@ export function saveBook(book: BookDocument): Promise<IDBValidKey> {
   return request("readwrite", (store) => store.put(book));
 }
 
-export async function saveFlashbook(book: BookDocument, images: { unitId: string; blob: Blob }[]): Promise<void> {
+export async function saveFlashbook(
+  book: BookDocument,
+  images: { unitId: string; blob: Blob }[]
+): Promise<void> {
   const db = await openDb();
   try {
     await new Promise<void>((resolve, reject) => {
-      const transaction = db.transaction([STORE_NAME, IMAGE_STORE], "readwrite");
+      const transaction = db.transaction(
+        [STORE_NAME, IMAGE_STORE],
+        "readwrite"
+      );
       transaction.objectStore(STORE_NAME).put(book);
       for (const image of images) {
-        transaction.objectStore(IMAGE_STORE).put(image.blob, `${book.documentId}:${image.unitId}`);
+        transaction
+          .objectStore(IMAGE_STORE)
+          .put(image.blob, `${book.documentId}:${image.unitId}`);
       }
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error);
+      transaction.onabort = () =>
+        reject(
+          transaction.error ??
+            new DOMException("保存を中止しました", "AbortError")
+        );
     });
   } finally {
     db.close();
   }
 }
 
-export async function getSourceImage(book: BookDocument, unitId: string): Promise<Blob | undefined> {
+export async function getSourceImage(
+  book: BookDocument,
+  unitId: string
+): Promise<Blob | undefined> {
   const db = await openDb();
   try {
     return await new Promise((resolve, reject) => {
       const transaction = db.transaction(IMAGE_STORE, "readonly");
-      const action = transaction.objectStore(IMAGE_STORE).get(`${book.documentId}:${unitId}`);
+      const action = transaction
+        .objectStore(IMAGE_STORE)
+        .get(`${book.documentId}:${unitId}`);
       action.onsuccess = () => resolve(action.result as Blob | undefined);
       action.onerror = () => reject(action.error);
     });
@@ -86,24 +113,34 @@ export function savePosition(book: BookDocument, offset: number): void {
     if (remaining <= length) break;
     remaining -= length + 1;
   }
-  localStorage.setItem(`flash-position:${book.documentId}`, JSON.stringify({
-    revisionId: book.revisionId, blockId: block.id,
-    offsetCp: Math.max(0, remaining), updatedAt: new Date().toISOString(),
-  }));
+  window.localStorage.setItem(
+    `flash-position:${book.documentId}`,
+    JSON.stringify({
+      revisionId: book.revisionId,
+      blockId: block.id,
+      offsetCp: Math.max(0, remaining),
+      updatedAt: new Date().toISOString(),
+    })
+  );
 }
 
 export function loadPosition(book: BookDocument): number {
-  // Storage access failures must reach the UI so it cannot overwrite an unread bookmark.
-  const raw = localStorage.getItem(`flash-position:${book.documentId}`);
+  // A read failure must not be mistaken for an empty bookmark and overwritten.
+  const raw = window.localStorage.getItem(`flash-position:${book.documentId}`);
   try {
     const saved = JSON.parse(raw ?? "null");
-    if (saved?.revisionId !== book.revisionId || !Number.isInteger(saved.offsetCp) || saved.offsetCp < 0) return 0;
+    if (
+      saved?.revisionId !== book.revisionId ||
+      !Number.isInteger(saved.offsetCp) ||
+      saved.offsetCp < 0
+    )
+      return 0;
     let offset = 0;
     for (const block of book.blocks) {
       if (block.id === saved.blockId) {
-        // Same revision means the same blocks, so an offset past this block is corrupt.
-        // Clamping it would resume at the next block instead of the beginning.
-        return saved.offsetCp <= Array.from(blockText(block)).length ? offset + saved.offsetCp : 0;
+        return saved.offsetCp <= Array.from(blockText(block)).length
+          ? offset + saved.offsetCp
+          : 0;
       }
       offset += Array.from(blockText(block)).length + 1;
     }

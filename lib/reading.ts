@@ -1,16 +1,40 @@
-export type Chunk = { text: string; start: number; end: number; blockId?: string; review?: boolean };
+export type Chunk = {
+  text: string;
+  start: number;
+  end: number;
+  blockId?: string;
+  review?: boolean;
+};
 
-/** Positions use Unicode code points, so a display change can keep its place. */
-export function splitIntoChunks(text: string, size: number, anchor = 0): Chunk[] {
-  if (size < 1) throw new RangeError("Chunk size must be positive");
-  const points = Array.from(text.replace(/\s+/g, " ").trim());
+const segmenter = new Intl.Segmenter("ja", { granularity: "grapheme" });
+
+// Keep offsets in code points so bookmarks are independent of the display size.
+export function splitIntoChunks(
+  text: string,
+  size: number,
+  anchor = 0
+): Chunk[] {
+  if (!Number.isInteger(size) || size < 1)
+    throw new RangeError("Chunk size must be a positive integer");
   const chunks: Chunk[] = [];
-  for (let start = 0; start < points.length;) {
-    let end = Math.min(start + size, points.length);
-    if (start < anchor && anchor < end) end = anchor;
-    chunks.push({ text: points.slice(start, end).join(""), start, end });
-    start = end;
+  let start = 0;
+  let end = 0;
+  let count = 0;
+  let chunk = "";
+  for (const { segment } of segmenter.segment(
+    text.replace(/\s+/g, " ").trim()
+  )) {
+    if (count && (count === size || end === anchor)) {
+      chunks.push({ text: chunk, start, end });
+      start = end;
+      count = 0;
+      chunk = "";
+    }
+    end += Array.from(segment).length;
+    count++;
+    chunk += segment;
   }
+  if (count) chunks.push({ text: chunk, start, end });
   return chunks;
 }
 
@@ -21,8 +45,11 @@ export function chunkIndexAt(chunks: Chunk[], offset: number): number {
 
 export function displayDurationMs(text: string, cpm: number): number {
   if (cpm <= 0) throw new RangeError("CPM must be positive");
-  const graphemes = Array.from(
-    new Intl.Segmenter("ja", { granularity: "grapheme" }).segment(text)
-  ).length;
+  const graphemes = Array.from(segmenter.segment(text)).length;
   return (60_000 * graphemes) / cpm;
+}
+
+export function readingProgress(chunks: Chunk[], index: number): number {
+  const length = chunks.at(-1)?.end;
+  return length ? (chunks[index].start / length) * 100 : 0;
 }

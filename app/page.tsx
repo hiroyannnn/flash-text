@@ -2,11 +2,16 @@
 
 import type React from "react";
 
-import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
-import { Textarea } from "@/components/ui/textarea";
-import { Play, Pause, RotateCcw, Settings } from "lucide-react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Sheet,
   SheetContent,
@@ -15,57 +20,75 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import { Slider } from "@/components/ui/slider";
+import { Textarea } from "@/components/ui/textarea";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Label } from "@/components/ui/label";
-import { chunkIndexAt, displayDurationMs, splitIntoChunks, type Chunk } from "@/lib/reading";
-import { bookChunks, importEpub, readingText, type BookDocument } from "@/lib/book";
-import { getSourceImage, listBooks, loadPosition, saveBook, saveFlashbook, savePosition } from "@/lib/book-store";
+  type BookDocument,
+  bookChunks,
+  importEpub,
+  readingText,
+} from "@/lib/book";
+import {
+  getSourceImage,
+  listBooks,
+  loadPosition,
+  saveBook,
+  saveFlashbook,
+  savePosition,
+} from "@/lib/book-store";
 import { importFlashbook } from "@/lib/flashbook";
+import {
+  type Chunk,
+  chunkIndexAt,
+  displayDurationMs,
+  readingProgress,
+  splitIntoChunks,
+} from "@/lib/reading";
+import { Pause, Play, RotateCcw, Settings } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export default function FlashReader() {
   const [inputText, setInputText] = useState("");
   const [books, setBooks] = useState<BookDocument[]>([]);
   const [activeBook, setActiveBook] = useState<BookDocument | null>(null);
   const [importError, setImportError] = useState("");
-  const [positionReadError, setPositionReadError] = useState(false);
-  const [positionSaveError, setPositionSaveError] = useState(false);
+  const [positionError, setPositionError] = useState<"read" | "write" | null>(
+    null
+  );
+  const positionReadFailed = positionError === "read";
   const [importing, setImporting] = useState(false);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const sourceUrlRef = useRef<string | null>(null);
+  const sourceRequestRef = useRef(0);
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [currentChunkIndex, setCurrentChunkIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [speed, setSpeed] = useState(300); // characters per minute
-  const [chunkSize, setChunkSize] = useState(5); // characters per chunk
+  const [speed, setSpeed] = useState(300);
+  const [chunkSize, setChunkSize] = useState(5);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const [progress, setProgress] = useState(0);
   const [speedMode, setSpeedMode] = useState<"low" | "mid" | "high" | "custom">(
     "mid"
   );
 
-  // Split text into Unicode code points, keeping stable text offsets.
-  const processText = () => {
-    if (!inputText.trim()) return;
+  const changeChunkSize = ([size]: number[]) => {
+    setChunkSize(size);
+    if (!chunks.length) return;
     const offset = chunks[currentChunkIndex]?.start ?? 0;
     const textChunks = activeBook
-      ? bookChunks(activeBook, chunkSize, offset)
-      : splitIntoChunks(inputText, chunkSize, offset);
+      ? bookChunks(activeBook, size, offset)
+      : splitIntoChunks(inputText, size, offset);
     const index = chunkIndexAt(textChunks, offset);
     setChunks(textChunks);
     setCurrentChunkIndex(index);
-    setProgress(textChunks.length <= 1 ? 0 : (index / (textChunks.length - 1)) * 100);
+    setProgress(readingProgress(textChunks, index));
   };
 
   const startReading = () => {
     if (chunks.length === 0) {
-      const initial = activeBook ? bookChunks(activeBook, chunkSize) : splitIntoChunks(inputText, chunkSize);
+      const initial = activeBook
+        ? bookChunks(activeBook, chunkSize)
+        : splitIntoChunks(inputText, chunkSize);
       setChunks(initial);
       setCurrentChunkIndex(0);
       setProgress(0);
@@ -77,20 +100,19 @@ export default function FlashReader() {
     setIsPlaying(true);
   };
 
-  // Pausing never advances to a chunk that has not been displayed.
   const pauseReading = () => setIsPlaying(false);
 
-  // Reset the flash reading
   const resetReading = () => {
+    closeSource();
     setIsPlaying(false);
     setCurrentChunkIndex(0);
     setProgress(0);
   };
 
-  // Handle text input change
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     closeSource();
     setActiveBook(null);
+    setPositionError(null);
     setInputText(e.target.value);
     setChunks([]);
     setCurrentChunkIndex(0);
@@ -99,23 +121,29 @@ export default function FlashReader() {
   };
 
   const openBook = (book: BookDocument) => {
-    closeSource();
-    const text = readingText(book);
     let offset = 0;
     try {
       offset = loadPosition(book);
-      setPositionReadError(false);
+      setPositionError(null);
     } catch {
-      setPositionReadError(true);
+      if (
+        positionReadFailed &&
+        activeBook?.documentId === book.documentId &&
+        activeBook.revisionId === book.revisionId
+      ) {
+        return;
+      }
+      setPositionError("read");
     }
-    setPositionSaveError(false);
+    closeSource();
+    const text = readingText(book);
     const nextChunks = bookChunks(book, chunkSize, offset);
     const index = chunkIndexAt(nextChunks, offset);
     setActiveBook(book);
     setInputText(text);
     setChunks(nextChunks);
     setCurrentChunkIndex(index);
-    setProgress(nextChunks.length <= 1 ? 0 : (index / (nextChunks.length - 1)) * 100);
+    setProgress(readingProgress(nextChunks, index));
     setIsPlaying(false);
   };
 
@@ -137,78 +165,102 @@ export default function FlashReader() {
       setBooks(await listBooks());
       openBook(book);
     } catch (error) {
-      setImportError(error instanceof Error ? error.message : "取り込みに失敗しました");
+      setImportError(
+        error instanceof Error ? error.message : "取り込みに失敗しました"
+      );
     } finally {
       setImporting(false);
       event.target.value = "";
     }
   };
 
-  const currentBlock = activeBook?.blocks.find((block) => block.id === chunks[currentChunkIndex]?.blockId);
-  const sourceUnitId = currentBlock?.kind === "review"
-    ? currentBlock.sourceUnitIds[0]
-    : currentBlock?.sourceSpans[0]?.unitId;
-  const sourceBox = currentBlock?.kind === "review" ? undefined : currentBlock?.sourceSpans[0]?.bbox;
+  const currentBlock = activeBook?.blocks.find(
+    (block) => block.id === chunks[currentChunkIndex]?.blockId
+  );
+  const sourceUnitId =
+    currentBlock?.kind === "review"
+      ? currentBlock.sourceUnitIds[0]
+      : currentBlock?.sourceSpans[0]?.unitId;
+  const sourceBox =
+    currentBlock?.kind === "review"
+      ? undefined
+      : currentBlock?.sourceSpans[0]?.bbox;
 
   const openSource = async () => {
     if (!activeBook || !sourceUnitId) return;
     setIsPlaying(false);
+    const request = ++sourceRequestRef.current;
     try {
       const blob = await getSourceImage(activeBook, sourceUnitId);
+      if (request !== sourceRequestRef.current) return;
       if (!blob) throw new Error("元画像が保存されていません");
       if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
       sourceUrlRef.current = URL.createObjectURL(blob);
       setSourceUrl(sourceUrlRef.current);
     } catch (error) {
-      setImportError(error instanceof Error ? error.message : "元画像を開けませんでした");
+      if (request !== sourceRequestRef.current) return;
+      setImportError(
+        error instanceof Error ? error.message : "元画像を開けませんでした"
+      );
     }
   };
 
   const closeSource = () => {
+    sourceRequestRef.current++;
     setSourceUrl(null);
     if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
     sourceUrlRef.current = null;
   };
 
-  useEffect(() => () => {
-    if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
-  }, []);
+  useEffect(
+    () => () => {
+      sourceRequestRef.current++;
+      if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
+    },
+    []
+  );
 
   useEffect(() => {
     if (!("indexedDB" in window)) return;
     let mounted = true;
-    listBooks().then((saved) => {
-      if (mounted) setBooks(saved);
-    }).catch(() => {
-      if (mounted) setImportError("保存済みの本を開けませんでした");
-    });
-    return () => { mounted = false; };
+    listBooks()
+      .then((saved) => {
+        if (mounted) setBooks(saved);
+      })
+      .catch(() => {
+        if (mounted) setImportError("保存済みの本を開けませんでした");
+      });
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const persistPosition = useCallback((book: BookDocument, offset: number) => {
     try {
       savePosition(book, offset);
-      setPositionSaveError(false);
+      setPositionError(null);
     } catch {
-      setPositionSaveError(true);
+      setPositionError("write");
     }
   }, []);
 
   useEffect(() => {
-    if (!activeBook) {
-      setPositionSaveError(false);
-    } else if (chunks.length && !positionReadError) {
-      persistPosition(activeBook, chunks[currentChunkIndex]?.start ?? 0);
+    if (activeBook && chunks.length && !positionReadFailed) {
+      persistPosition(activeBook, chunks[currentChunkIndex].start);
     }
-  }, [activeBook, chunks, currentChunkIndex, positionReadError, persistPosition]);
+  }, [
+    activeBook,
+    chunks,
+    currentChunkIndex,
+    persistPosition,
+    positionReadFailed,
+  ]);
 
-  // Handle speed preset change
   const handleSpeedPresetChange = (
     value: "low" | "mid" | "high" | "custom"
   ) => {
     setSpeedMode(value);
 
-    // Set speed based on preset
     switch (value) {
       case "low":
         setSpeed(150);
@@ -219,26 +271,27 @@ export default function FlashReader() {
       case "high":
         setSpeed(600);
         break;
-      // For custom, keep the current speed
     }
   };
 
-  // Update chunk index and progress
   useEffect(() => {
     if (isPlaying && chunks.length > 0) {
       if (chunks[currentChunkIndex]?.review) {
         setIsPlaying(false);
         return;
       }
-      timerRef.current = setTimeout(() => {
-        if (currentChunkIndex < chunks.length - 1) {
-          setCurrentChunkIndex((prev) => prev + 1);
-          setProgress(((currentChunkIndex + 1) / (chunks.length - 1)) * 100);
-        } else {
-          setIsPlaying(false);
-          setProgress(100);
-        }
-      }, displayDurationMs(chunks[currentChunkIndex].text, speed));
+      timerRef.current = setTimeout(
+        () => {
+          if (currentChunkIndex < chunks.length - 1) {
+            setCurrentChunkIndex((prev) => prev + 1);
+            setProgress(readingProgress(chunks, currentChunkIndex + 1));
+          } else {
+            setIsPlaying(false);
+            setProgress(100);
+          }
+        },
+        displayDurationMs(chunks[currentChunkIndex].text, speed)
+      );
     }
 
     return () => {
@@ -253,16 +306,9 @@ export default function FlashReader() {
       if (document.hidden) setIsPlaying(false);
     };
     document.addEventListener("visibilitychange", pauseWhenHidden);
-    return () => document.removeEventListener("visibilitychange", pauseWhenHidden);
+    return () =>
+      document.removeEventListener("visibilitychange", pauseWhenHidden);
   }, []);
-
-  // Process text when chunk size changes
-  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
-  useEffect(() => {
-    if (inputText.trim()) {
-      processText();
-    }
-  }, [chunkSize]);
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-3xl">
@@ -274,20 +320,40 @@ export default function FlashReader() {
         <Card>
           <CardHeader>
             <CardTitle>本を取り込む</CardTitle>
-            <CardDescription>公式EPUBまたは取得済み画面の読書用ZIPを端末内に保存します</CardDescription>
+            <CardDescription>
+              暗号化されていないEPUBや取得済み画面の読書用ZIPを端末内に保存します
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <input type="file" accept=".epub,.zip,application/epub+zip" aria-label="本のファイルを選ぶ"
-              onChange={handleImport} disabled={importing} />
-            {importing && <output className="block">取り込み中...</output>}
-            {importError && <p role="alert" className="text-destructive">{importError}</p>}
+            <input
+              type="file"
+              accept=".epub,.zip,application/epub+zip"
+              aria-label="本のファイルを選ぶ"
+              onChange={handleImport}
+              disabled={importing}
+            />
+            {importing && <output>取り込み中...</output>}
+            {importError && (
+              <p role="alert" className="text-destructive">
+                {importError}
+              </p>
+            )}
             {books.map((book) => (
-              <div key={book.documentId} className="flex items-center justify-between gap-2">
+              <div
+                key={book.documentId}
+                className="flex items-center justify-between gap-2"
+              >
                 <span className="truncate">{book.title}</span>
-                <Button variant="outline" onClick={() => openBook(book)}>続きから</Button>
+                <Button variant="outline" onClick={() => openBook(book)}>
+                  続きから
+                </Button>
               </div>
             ))}
-            {activeBook && <p className="text-sm text-muted-foreground">{activeBook.title}・取り込み済み範囲</p>}
+            {activeBook && (
+              <p className="text-sm text-muted-foreground">
+                {activeBook.title}・取り込み済み範囲
+              </p>
+            )}
           </CardContent>
         </Card>
         <Card>
@@ -311,6 +377,7 @@ export default function FlashReader() {
                 onClick={() => {
                   closeSource();
                   setActiveBook(null);
+                  setPositionError(null);
                   setInputText(`「あれ、意外と読める」と気づきました。フラッシュテキストで文章を読んでみたら、普段より早く読めるんです。目線を左右に動かす必要がないから、自然と読むスピードが上がるみたい。
 
 長文を読む時って、目線を右から左に動かすのが意外と時間を取るんですよね。でもフラッシュテキストなら、文字が目の前に表示されるから、その分だけ早く読める。最初は「こんな速さで読めるの？」って思ったけど、使ってみたら意外と自然に読めました。
@@ -334,7 +401,7 @@ export default function FlashReader() {
               <CardTitle>フラッシュ表示</CardTitle>
               <Sheet>
                 <SheetTrigger asChild>
-                  <Button variant="outline" size="icon">
+                  <Button variant="outline" size="icon" aria-label="設定">
                     <Settings className="h-4 w-4" />
                   </Button>
                 </SheetTrigger>
@@ -401,7 +468,7 @@ export default function FlashReader() {
                         min={1}
                         max={10}
                         step={1}
-                        onValueChange={(value) => setChunkSize(value[0])}
+                        onValueChange={changeChunkSize}
                       />
                     </div>
                   </div>
@@ -410,23 +477,38 @@ export default function FlashReader() {
             </div>
           </CardHeader>
           <CardContent>
-            {activeBook && positionReadError && (
-              <div role="alert" className="mb-4 space-y-2 text-destructive">
-                <p>読書位置を読み込めません。先頭から一時的に開いています。保存済みの位置は上書きしません。</p>
-                <Button variant="outline" onClick={() => openBook(activeBook)}>保存位置を再読込</Button>
+            {activeBook && positionReadFailed && (
+              <div className="mb-4 space-y-2">
+                <p role="alert" className="text-destructive">
+                  読書位置を読み込めません。先頭から一時的に開いています。保存済みの位置は上書きしません。
+                </p>
+                <Button variant="outline" onClick={() => openBook(activeBook)}>
+                  保存位置を再読込
+                </Button>
               </div>
             )}
-            {activeBook && !positionReadError && positionSaveError && (
-              <div role="alert" className="mb-4 space-y-2 text-destructive">
-                <p>読書位置を保存できません。別の本を開いたりページを閉じると、最後に保存できた位置に戻ります。</p>
-                <Button variant="outline" onClick={() => persistPosition(activeBook, chunks[currentChunkIndex]?.start ?? 0)}>保存を再試行</Button>
+            {activeBook && positionError === "write" && (
+              <div className="mb-4 space-y-2">
+                <p role="alert" className="text-destructive">
+                  読書位置を保存できません。別の本を開いたりページを閉じると、最後に保存できた位置に戻ります。
+                </p>
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    persistPosition(activeBook, chunks[currentChunkIndex].start)
+                  }
+                >
+                  保存を再試行
+                </Button>
               </div>
             )}
             <div className="flex flex-col items-center">
               <div className="h-32 flex items-center justify-center w-full mb-4 border rounded-lg">
                 <p className="text-2xl font-medium text-center px-4">
                   {chunks.length > 0
-                    ? chunks[currentChunkIndex].review ? "原文の確認が必要です" : chunks[currentChunkIndex].text
+                    ? chunks[currentChunkIndex].review
+                      ? "原文の確認が必要です"
+                      : chunks[currentChunkIndex].text
                     : "テキストを入力して開始ボタンを押してください"}
                 </p>
               </div>
@@ -446,19 +528,29 @@ export default function FlashReader() {
               </div>
 
               <div className="flex gap-2">
-                {activeBook?.sourceKind === "kindle-capture" && currentBlock && (
-                  <Button variant="outline" onClick={() => void openSource()}>元画像</Button>
-                )}
+                {activeBook?.sourceKind === "kindle-capture" &&
+                  currentBlock && (
+                    <Button variant="outline" onClick={() => void openSource()}>
+                      元画像
+                    </Button>
+                  )}
                 {chunks[currentChunkIndex]?.review && (
-                  <Button onClick={() => {
-                    closeSource();
-                    if (currentChunkIndex < chunks.length - 1) {
-                      setCurrentChunkIndex((index) => index + 1);
-                      setIsPlaying(true);
-                    } else {
-                      setProgress(100);
-                    }
-                  }}>確認して続ける</Button>
+                  <Button
+                    onClick={() => {
+                      closeSource();
+                      if (currentChunkIndex < chunks.length - 1) {
+                        setCurrentChunkIndex((index) => index + 1);
+                        setProgress(
+                          readingProgress(chunks, currentChunkIndex + 1)
+                        );
+                        setIsPlaying(true);
+                      } else {
+                        setProgress(100);
+                      }
+                    }}
+                  >
+                    確認して続ける
+                  </Button>
                 )}
                 {!isPlaying ? (
                   <Button onClick={startReading} disabled={!inputText.trim()}>
@@ -479,13 +571,26 @@ export default function FlashReader() {
               </div>
               {sourceUrl && (
                 <div className="mt-6 w-full">
-                  <Button variant="outline" onClick={closeSource}>元画像を閉じる</Button>
+                  <Button variant="outline" onClick={closeSource}>
+                    元画像を閉じる
+                  </Button>
                   <div className="relative mt-2">
-                    <img src={sourceUrl} alt="取り込み時の元画面" className="w-full h-auto" />
-                    {sourceBox && <div className="absolute border-2 border-red-500 pointer-events-none" style={{
-                      left: `${sourceBox[0] * 100}%`, top: `${sourceBox[1] * 100}%`,
-                      width: `${sourceBox[2] * 100}%`, height: `${sourceBox[3] * 100}%`,
-                    }} />}
+                    <img
+                      src={sourceUrl}
+                      alt="取り込み時の元画面"
+                      className="w-full h-auto"
+                    />
+                    {sourceBox && (
+                      <div
+                        className="absolute border-2 border-red-500 pointer-events-none"
+                        style={{
+                          left: `${sourceBox[0] * 100}%`,
+                          top: `${sourceBox[1] * 100}%`,
+                          width: `${sourceBox[2] * 100}%`,
+                          height: `${sourceBox[3] * 100}%`,
+                        }}
+                      />
+                    )}
                   </div>
                 </div>
               )}
