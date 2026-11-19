@@ -8,7 +8,6 @@ export type Chunk = {
 
 const segmenter = new Intl.Segmenter("ja", { granularity: "grapheme" });
 
-// Keep offsets in code points so bookmarks are independent of the display size.
 export function splitIntoChunks(
   text: string,
   size: number,
@@ -49,7 +48,14 @@ export function displayDurationMs(text: string, cpm: number): number {
   return (60_000 * graphemes) / cpm;
 }
 
-export function readingProgress(chunks: Chunk[], index: number): number {
-  const length = chunks.at(-1)?.end;
-  return length ? (chunks[index].start / length) * 100 : 0;
+// Reaching the final chunk starts its display timer; it does not complete the book.
+export function readingProgress(
+  offset: number,
+  total: number,
+  completed: boolean
+): number {
+  if (completed) return 100;
+  return total > 0
+    ? Math.max(0, Math.min(99, Math.floor((offset / total) * 100)))
+    : 0;
 }
