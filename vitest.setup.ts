@@ -32,6 +32,18 @@ class FakeObjectStore {
   ) {}
 
   put(value: unknown, key?: IDBValidKey): FakeRequest<IDBValidKey> {
+    return this.write(value, key, true);
+  }
+
+  add(value: unknown, key?: IDBValidKey): FakeRequest<IDBValidKey> {
+    return this.write(value, key, false);
+  }
+
+  private write(
+    value: unknown,
+    key: IDBValidKey | undefined,
+    overwrite: boolean
+  ): FakeRequest<IDBValidKey> {
     if (this.transaction.mode === "readonly") throw domError("ReadOnlyError");
     const keyPath = this.store.keyPath;
     const resolvedKey =
@@ -41,6 +53,8 @@ class FakeObjectStore {
     if (resolvedKey === undefined) throw domError("DataError");
     const stored = cloneValue(value);
     return this.transaction.enqueue(() => {
+      if (!overwrite && this.store.records.has(String(resolvedKey)))
+        throw domError("ConstraintError");
       this.store.records.set(String(resolvedKey), stored);
       return resolvedKey;
     });
@@ -68,6 +82,7 @@ class FakeTransaction {
   onerror: (() => void) | null = null;
   onabort: (() => void) | null = null;
   private operations: (() => void)[] = [];
+  private aborted = false;
 
   constructor(
     private stores: Map<string, FakeStore>,
@@ -92,12 +107,18 @@ class FakeTransaction {
     return request;
   }
 
+  abort(): void {
+    this.aborted = true;
+  }
+
   private run(): void {
     const snapshot = new Map(
       Array.from(this.stores, ([name, store]) => [name, new Map(store.records)])
     );
     try {
-      while (this.operations.length) this.operations.shift()?.();
+      while (this.operations.length && !this.aborted)
+        this.operations.shift()?.();
+      if (this.aborted) throw domError("AbortError");
     } catch (error) {
       for (const [name, records] of snapshot) {
         const store = this.stores.get(name);
